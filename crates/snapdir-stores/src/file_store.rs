@@ -37,6 +37,9 @@ use snapdir_core::manifest::{Manifest, PathType};
 use snapdir_core::merkle::{Blake3Hasher, Hasher};
 use snapdir_core::store::{manifest_path, object_path, Store, StoreError};
 
+use crate::transfer::TransferConfig;
+use crate::util::{file_present_and_verified, hash_file};
+
 /// Number of times the oracle retries a persist whose copied bytes fail their
 /// checksum but whose source still verifies (`_SNAPDIR_FILE_STORE_RETRIES`).
 const MAX_PERSIST_RETRIES: u32 = 5;
@@ -49,6 +52,7 @@ const MAX_PERSIST_RETRIES: u32 = 5;
 #[derive(Debug, Clone)]
 pub struct FileStore {
     root: PathBuf,
+    config: TransferConfig,
 }
 
 impl FileStore {
@@ -64,16 +68,41 @@ impl FileStore {
         Self::from_root(parse_store_dir(store))
     }
 
+    /// Like [`new`](Self::new), but carries a [`TransferConfig`] for
+    /// concurrency / bandwidth control.
+    #[must_use]
+    pub fn new_with_config(store: &str, config: TransferConfig) -> Self {
+        Self::from_root_with_config(parse_store_dir(store), config)
+    }
+
     /// Builds a store rooted at an already-resolved directory.
     #[must_use]
     pub fn from_root(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::from_root_with_config(root, TransferConfig::default())
+    }
+
+    /// Like [`from_root`](Self::from_root), but carries a [`TransferConfig`] for
+    /// concurrency / bandwidth control. [`from_root`](Self::from_root) and
+    /// [`new`](Self::new) delegate here with [`TransferConfig::default`].
+    #[must_use]
+    pub fn from_root_with_config(root: impl Into<PathBuf>, config: TransferConfig) -> Self {
+        Self {
+            root: root.into(),
+            config,
+        }
     }
 
     /// Returns the store's root directory.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The [`TransferConfig`] (concurrency / bandwidth) this store was built
+    /// with. Consumed by the transfer loops in later gates.
+    #[must_use]
+    pub fn transfer_config(&self) -> &TransferConfig {
+        &self.config
     }
 
     /// Absolute on-disk path of an object given its checksum.
@@ -84,6 +113,37 @@ impl FileStore {
     /// Absolute on-disk path of a manifest given its snapshot id.
     fn manifest_disk_path(&self, id: &str) -> PathBuf {
         self.root.join(manifest_path(id))
+    }
+
+    /// Copies a batch of `(source, target, expected_checksum)` jobs through
+    /// [`persist`] across a thread pool bounded by `self.config.concurrency`.
+    ///
+    /// Local copies have no network bandwidth concern, so the async
+    /// rate-limited transfer driver does not apply here — only the concurrency
+    /// cap. The first [`StoreError`] is propagated and stops scheduling further
+    /// work (`try_for_each`). A `concurrency` of 1 yields a single-threaded
+    /// sequential copy. Each task uses a fresh, cheap, stateless
+    /// [`Blake3Hasher`] to sidestep any `Sync` concern.
+    fn parallel_copy(&self, jobs: &[(PathBuf, PathBuf, String)]) -> Result<(), StoreError> {
+        use rayon::prelude::*;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.config.concurrency.get())
+            .build()
+            .map_err(|err| StoreError::Backend {
+                message: "failed to build copy thread pool".to_owned(),
+                source: Some(Box::new(err)),
+            })?;
+
+        pool.install(|| {
+            jobs.par_iter().try_for_each(|(source, target, expected)| {
+                persist(source, target, expected, &Blake3Hasher::new())
+            })
+        })
     }
 }
 
@@ -123,6 +183,17 @@ impl Store for FileStore {
 
     fn fetch_files(&self, manifest: &Manifest, dest: &Path) -> Result<(), StoreError> {
         let hasher = Blake3Hasher::new();
+
+        // First, SEQUENTIAL pass: materialize every directory and pre-create
+        // each file's parent (so the parallel copies below never race on
+        // `create_dir_all` of the same ancestor), short-circuit files that are
+        // already present-and-verified (skip-if-present-and-verified — no object
+        // read at all, so a populated dest succeeds even if the store object is
+        // gone), and confirm the source object exists for the rest (preserving
+        // the `ObjectNotFound` error when a needed source is missing). The file
+        // entries that actually need copying are collected as `(source, target,
+        // checksum)` jobs for the parallel phase.
+        let mut jobs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
         for entry in manifest.entries() {
             let rel = strip_leading_dot_slash(&entry.path);
             let target = dest.join(rel);
@@ -131,6 +202,13 @@ impl Store for FileStore {
                     fs::create_dir_all(&target)?;
                 }
                 PathType::File => {
+                    // A destination file that already exists and whose content
+                    // hashes to the manifest's checksum needs no copy. A
+                    // mismatching/corrupt local file falls through and is
+                    // repaired by the persist below.
+                    if file_present_and_verified(&target, &entry.checksum, &hasher) {
+                        continue;
+                    }
                     if let Some(parent) = target.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -140,11 +218,15 @@ impl Store for FileStore {
                             checksum: entry.checksum.clone(),
                         });
                     }
-                    persist(&source, &target, &entry.checksum, &hasher)?;
+                    jobs.push((source, target, entry.checksum.clone()));
                 }
             }
         }
-        Ok(())
+
+        // Parallel copy phase, bounded by `config.concurrency`. `try_for_each`
+        // propagates the first `StoreError` and stops scheduling new work. Each
+        // task uses a fresh, cheap, stateless `Blake3Hasher`.
+        self.parallel_copy(&jobs)
     }
 
     fn push(&self, manifest: &Manifest, source: &Path) -> Result<(), StoreError> {
@@ -161,21 +243,28 @@ impl Store for FileStore {
             return Ok(());
         }
 
-        // Push every referenced object that is absent, BEFORE the manifest.
+        // Collect every referenced object that is absent (skip-if-present per
+        // object: an object already filed under its content address is trusted,
+        // it is content-addressable). These are copied BEFORE the manifest.
+        let mut jobs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
         for entry in manifest.entries() {
             if entry.path_type != PathType::File {
                 continue;
             }
             let object_target = self.object_disk_path(&entry.checksum);
             if object_target.exists() {
-                // Skip-if-present per object: trust an object already filed
-                // under its content address (it is content-addressable).
                 continue;
             }
             let rel = strip_leading_dot_slash(&entry.path);
             let object_source = source.join(rel);
-            persist(&object_source, &object_target, &entry.checksum, &hasher)?;
+            jobs.push((object_source, object_target, entry.checksum.clone()));
         }
+
+        // Parallel copy phase, bounded by `config.concurrency`. ALL-OR-NOTHING:
+        // any error returns immediately and NO manifest is written; the
+        // manifest is written only after every object copy succeeds, preserving
+        // the invariant that a present manifest implies present objects.
+        self.parallel_copy(&jobs)?;
 
         // Write the manifest last, via the same verify/retry/atomic-rename
         // path, so a present manifest always implies present objects.
@@ -277,12 +366,6 @@ fn write_manifest(
 fn copy_file(source: &Path, target: &Path) -> Result<(), StoreError> {
     fs::copy(source, target)?;
     Ok(())
-}
-
-/// Hashes a file's full byte content with `hasher`.
-fn hash_file(path: &Path, hasher: &impl Hasher) -> Result<String, StoreError> {
-    let bytes = fs::read(path)?;
-    Ok(hasher.hash_hex(&bytes))
 }
 
 /// Builds a unique temp sibling path for `target` (same directory, so the
@@ -642,6 +725,335 @@ mod tests {
         }
         // The corrupt object must NOT have been materialized at the dest.
         assert!(!dest_dir.path().join("foo").exists());
+    }
+
+    #[test]
+    fn fetch_skip_present_verified() {
+        // Push a tree, fetch it (populating dest), then DELETE the store's whole
+        // `.objects` tree so any object read would now fail with ObjectNotFound.
+        // A second fetch into the SAME dest must still return Ok — proving every
+        // file was skipped via local checksum match (ZERO object reads).
+        let store_dir = TempDir::new("store");
+        let src_dir = TempDir::new("src");
+        let dest_dir = TempDir::new("dest");
+        let (manifest, id) = make_foo_bar_source(src_dir.path());
+
+        let store = FileStore::from_root(store_dir.path());
+        store.push(&manifest, src_dir.path()).expect("push");
+
+        let fetched = store.get_manifest(&id).expect("get manifest");
+        store
+            .fetch_files(&fetched, dest_dir.path())
+            .expect("first fetch populates dest");
+        assert_eq!(fs::read(dest_dir.path().join("foo")).unwrap(), b"foo\n");
+        assert_eq!(fs::read(dest_dir.path().join("bar")).unwrap(), b"bar\n");
+
+        // Nuke every object in the store. Any read of an object now fails.
+        let objects = store_dir.path().join(".objects");
+        fs::remove_dir_all(&objects).expect("remove .objects tree");
+        assert!(!objects.exists());
+
+        // Second fetch into the populated dest must succeed without reading a
+        // single (now-missing) object.
+        store
+            .fetch_files(&fetched, dest_dir.path())
+            .expect("second fetch skips every present+verified file (no object reads)");
+
+        // Dest contents intact.
+        assert_eq!(fs::read(dest_dir.path().join("foo")).unwrap(), b"foo\n");
+        assert_eq!(fs::read(dest_dir.path().join("bar")).unwrap(), b"bar\n");
+    }
+
+    #[test]
+    fn file_store_fetch_repairs_corrupt_dest_and_skips_intact() {
+        // With store objects present: corrupt one dest file. The corrupted file
+        // is re-fetched (repaired) to match its checksum again, while an
+        // unrelated already-correct dest file is still skipped.
+        let store_dir = TempDir::new("store");
+        let src_dir = TempDir::new("src");
+        let dest_dir = TempDir::new("dest");
+        let (manifest, id) = make_foo_bar_source(src_dir.path());
+
+        let store = FileStore::from_root(store_dir.path());
+        store.push(&manifest, src_dir.path()).expect("push");
+        let fetched = store.get_manifest(&id).expect("get manifest");
+        store
+            .fetch_files(&fetched, dest_dir.path())
+            .expect("first fetch populates dest");
+
+        // Corrupt `foo` in the dest; leave `bar` correct.
+        fs::write(dest_dir.path().join("foo"), b"WRONG\n").unwrap();
+        // Remove `bar`'s store object so it CANNOT be re-fetched; the only way a
+        // second fetch can succeed is if `bar` is skipped (present + verified).
+        let bar_entry = manifest
+            .entries()
+            .iter()
+            .find(|e| e.path == "./bar")
+            .unwrap();
+        let bar_obj = store_dir.path().join(object_path(&bar_entry.checksum));
+        fs::remove_file(&bar_obj).unwrap();
+
+        store
+            .fetch_files(&fetched, dest_dir.path())
+            .expect("repair corrupt foo, skip intact bar");
+
+        // foo repaired back to its checksummed content; bar untouched.
+        assert_eq!(fs::read(dest_dir.path().join("foo")).unwrap(), b"foo\n");
+        assert_eq!(fs::read(dest_dir.path().join("bar")).unwrap(), b"bar\n");
+    }
+
+    #[test]
+    fn file_store_fetch_mismatch_then_missing_object_errors() {
+        // Confirms the skip is checksum-gated, not mere existence: corrupt a
+        // dest file AND remove its store object → fetch cannot repair and errors
+        // ObjectNotFound (it did not blindly skip the present-but-wrong file).
+        let store_dir = TempDir::new("store");
+        let src_dir = TempDir::new("src");
+        let dest_dir = TempDir::new("dest");
+        let (manifest, id) = make_foo_bar_source(src_dir.path());
+
+        let store = FileStore::from_root(store_dir.path());
+        store.push(&manifest, src_dir.path()).expect("push");
+        let fetched = store.get_manifest(&id).expect("get manifest");
+        store
+            .fetch_files(&fetched, dest_dir.path())
+            .expect("first fetch populates dest");
+
+        let foo_entry = manifest
+            .entries()
+            .iter()
+            .find(|e| e.path == "./foo")
+            .unwrap();
+        // Corrupt the dest file so the skip gate fails for it...
+        fs::write(dest_dir.path().join("foo"), b"WRONG\n").unwrap();
+        // ...and remove its store object so it cannot be repaired.
+        let foo_obj = store_dir.path().join(object_path(&foo_entry.checksum));
+        fs::remove_file(&foo_obj).unwrap();
+
+        match store.fetch_files(&fetched, dest_dir.path()) {
+            Err(StoreError::ObjectNotFound { checksum }) => {
+                assert_eq!(checksum, foo_entry.checksum);
+            }
+            other => panic!("expected ObjectNotFound (cannot repair), got {other:?}"),
+        }
+    }
+
+    /// Builds a small nested tree under `source` (several files across nested
+    /// directories) and returns its manifest + snapshot id, with real BLAKE3
+    /// checksums so store verification passes. Layout:
+    ///
+    /// ```text
+    /// ./a.txt            "a contents\n"
+    /// ./b.txt            "b contents\n"
+    /// ./sub/             (dir)
+    /// ./sub/c.txt        "c contents\n"
+    /// ./sub/deep/        (dir)
+    /// ./sub/deep/d.txt   "d contents\n"
+    /// ```
+    fn make_nested_source(source: &Path) -> (Manifest, String) {
+        let hasher = Blake3Hasher::new();
+        let files: &[(&str, &[u8])] = &[
+            ("a.txt", b"a contents\n"),
+            ("b.txt", b"b contents\n"),
+            ("sub/c.txt", b"c contents\n"),
+            ("sub/deep/d.txt", b"d contents\n"),
+        ];
+
+        fs::create_dir_all(source.join("sub/deep")).unwrap();
+        for (rel, bytes) in files {
+            fs::write(source.join(rel), bytes).unwrap();
+        }
+
+        let mut manifest = Manifest::new();
+        // Directory entries first; their checksums/sizes are not verified on
+        // fetch (only files are content-addressed), so placeholder values are
+        // fine for re-materialization. The snapshot id derivation in core hashes
+        // the rendered text regardless, and we round-trip through it below.
+        manifest.push(ManifestEntry::new(PathType::Directory, "700", "x", 0, "./"));
+        manifest.push(ManifestEntry::new(
+            PathType::Directory,
+            "700",
+            "x",
+            0,
+            "./sub/",
+        ));
+        manifest.push(ManifestEntry::new(
+            PathType::Directory,
+            "700",
+            "x",
+            0,
+            "./sub/deep/",
+        ));
+        for (rel, bytes) in files {
+            let sum = hasher.hash_hex(bytes);
+            #[allow(clippy::cast_possible_truncation)]
+            manifest.push(ManifestEntry::new(
+                PathType::File,
+                "600",
+                sum,
+                bytes.len() as u64,
+                format!("./{rel}"),
+            ));
+        }
+
+        let manifest = Manifest::from_entries(manifest.entries().to_vec());
+        let id = snapdir_core::merkle::snapshot_id(&manifest, &hasher);
+        (manifest, id)
+    }
+
+    /// Asserts the four nested files re-materialized byte-identically at `dest`.
+    fn assert_nested_dest(dest: &Path) {
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"a contents\n");
+        assert_eq!(fs::read(dest.join("b.txt")).unwrap(), b"b contents\n");
+        assert_eq!(fs::read(dest.join("sub/c.txt")).unwrap(), b"c contents\n");
+        assert_eq!(
+            fs::read(dest.join("sub/deep/d.txt")).unwrap(),
+            b"d contents\n"
+        );
+    }
+
+    #[test]
+    fn filestore_parallel_roundtrip_byte_identical() {
+        // A multi-threaded (concurrency=4) push+fetch round-trip of a nested
+        // tree must re-materialize byte-identically, and a sequential
+        // (concurrency=1) run must produce the identical store + dest.
+        let src_dir = TempDir::new("src");
+        let (manifest, id) = make_nested_source(src_dir.path());
+
+        // Parallel run.
+        let par_store_dir = TempDir::new("store-par");
+        let par_dest_dir = TempDir::new("dest-par");
+        let par_store =
+            FileStore::from_root_with_config(par_store_dir.path(), TransferConfig::new(4, None));
+        par_store.push(&manifest, src_dir.path()).expect("par push");
+        let par_manifest = par_store.get_manifest(&id).expect("par get manifest");
+        assert_eq!(par_manifest, manifest, "round-tripped manifest matches");
+        par_store
+            .fetch_files(&par_manifest, par_dest_dir.path())
+            .expect("par fetch");
+        assert_nested_dest(par_dest_dir.path());
+
+        // Sequential run into a fresh store/dest.
+        let seq_store_dir = TempDir::new("store-seq");
+        let seq_dest_dir = TempDir::new("dest-seq");
+        let seq_store =
+            FileStore::from_root_with_config(seq_store_dir.path(), TransferConfig::new(1, None));
+        seq_store.push(&manifest, src_dir.path()).expect("seq push");
+        let seq_id = snapdir_core::merkle::snapshot_id(&manifest, &Blake3Hasher::new());
+        assert_eq!(seq_id, id, "snapshot id is concurrency-independent");
+        seq_store
+            .fetch_files(&manifest, seq_dest_dir.path())
+            .expect("seq fetch");
+        assert_nested_dest(seq_dest_dir.path());
+
+        // Both stores landed every object at the identical sharded key with
+        // identical bytes.
+        for entry in manifest.entries() {
+            if entry.path_type != PathType::File {
+                continue;
+            }
+            let key = object_path(&entry.checksum);
+            let par_obj = par_store_dir.path().join(&key);
+            let seq_obj = seq_store_dir.path().join(&key);
+            assert!(par_obj.exists(), "par object {key} present");
+            assert!(seq_obj.exists(), "seq object {key} present");
+            assert_eq!(
+                fs::read(&par_obj).unwrap(),
+                fs::read(&seq_obj).unwrap(),
+                "par and seq object bytes identical"
+            );
+        }
+    }
+
+    #[test]
+    fn filestore_parallel_concurrency_one_sequential() {
+        // The concurrency=1 (single-thread pool) path is a correct sequential
+        // copy: round-trips byte-identically.
+        let store_dir = TempDir::new("store");
+        let src_dir = TempDir::new("src");
+        let dest_dir = TempDir::new("dest");
+        let (manifest, id) = make_nested_source(src_dir.path());
+
+        let store =
+            FileStore::from_root_with_config(store_dir.path(), TransferConfig::new(1, None));
+        store.push(&manifest, src_dir.path()).expect("push");
+        let fetched = store.get_manifest(&id).expect("get manifest");
+        store.fetch_files(&fetched, dest_dir.path()).expect("fetch");
+        assert_nested_dest(dest_dir.path());
+    }
+
+    #[test]
+    fn filestore_parallel_all_or_nothing_bad_object() {
+        // A source file whose bytes do not match its manifest checksum must make
+        // push fail with `Integrity` AND write NO manifest (all-or-nothing:
+        // manifest is written only after every parallel object copy succeeds).
+        let store_dir = TempDir::new("store");
+        let src_dir = TempDir::new("src");
+        let (manifest, id) = make_nested_source(src_dir.path());
+
+        // Corrupt one source file so its bytes no longer hash to the manifest
+        // checksum; persist's source-verify trips and push returns Integrity.
+        fs::write(src_dir.path().join("sub/c.txt"), b"TAMPERED\n").unwrap();
+
+        let store =
+            FileStore::from_root_with_config(store_dir.path(), TransferConfig::new(4, None));
+        match store.push(&manifest, src_dir.path()) {
+            Err(StoreError::Integrity { .. }) => {}
+            other => panic!("expected Integrity from bad source object, got {other:?}"),
+        }
+
+        // ALL-OR-NOTHING: the manifest must NOT have been written.
+        let man_path = store.manifest_disk_path(&id);
+        assert!(
+            !man_path.exists(),
+            "manifest must not be written when an object copy fails"
+        );
+    }
+
+    #[test]
+    fn filestore_parallel_large_n_round_trips() {
+        // Exercise the concurrency bound with N >> concurrency files.
+        let store_dir = TempDir::new("store");
+        let src_dir = TempDir::new("src");
+        let dest_dir = TempDir::new("dest");
+        let hasher = Blake3Hasher::new();
+
+        let mut manifest = Manifest::new();
+        manifest.push(ManifestEntry::new(PathType::Directory, "700", "x", 0, "./"));
+        let n = 50usize;
+        for i in 0..n {
+            let name = format!("file-{i:03}.txt");
+            let contents = format!("contents of file {i}\n");
+            fs::write(src_dir.path().join(&name), contents.as_bytes()).unwrap();
+            let sum = hasher.hash_hex(contents.as_bytes());
+            #[allow(clippy::cast_possible_truncation)]
+            manifest.push(ManifestEntry::new(
+                PathType::File,
+                "600",
+                sum,
+                contents.len() as u64,
+                format!("./{name}"),
+            ));
+        }
+        let manifest = Manifest::from_entries(manifest.entries().to_vec());
+        let id = snapdir_core::merkle::snapshot_id(&manifest, &hasher);
+
+        let store =
+            FileStore::from_root_with_config(store_dir.path(), TransferConfig::new(4, None));
+        store.push(&manifest, src_dir.path()).expect("push N files");
+        let fetched = store.get_manifest(&id).expect("get manifest");
+        store
+            .fetch_files(&fetched, dest_dir.path())
+            .expect("fetch N files");
+
+        for i in 0..n {
+            let name = format!("file-{i:03}.txt");
+            let expected = format!("contents of file {i}\n");
+            assert_eq!(
+                fs::read(dest_dir.path().join(&name)).unwrap(),
+                expected.as_bytes()
+            );
+        }
     }
 
     #[test]

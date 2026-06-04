@@ -24,11 +24,11 @@ use snapdir_catalog::{
 };
 use snapdir_core::{
     cache, expand_excludes, snapshot_id, walk, Blake3Hasher, Blake3KeyedHasher, ExcludeMatcher,
-    FollowMode, Hasher, Manifest, ManifestEntry, Md5Hasher, PathMode, PathType, Sha256Hasher,
-    Store, WalkOptions,
+    ExpandedExclude, FollowMode, Hasher, Manifest, ManifestEntry, Md5Hasher, PathMode, PathType,
+    Sha256Hasher, Store, WalkOptions,
 };
 use snapdir_stores::{
-    resolve_adapter, Adapter, B2Store, ExternalStore, FileStore, GcsStore, S3Store,
+    resolve_adapter, Adapter, B2Store, ExternalStore, FileStore, GcsStore, S3Store, TransferConfig,
 };
 
 /// Content-addressable directory snapshots.
@@ -78,12 +78,32 @@ pub struct GlobalArgs {
     pub id: Option<String>,
 
     /// Exclude paths matching PATTERN.
-    #[arg(long, global = true, value_name = "PATTERN")]
-    pub exclude: Option<String>,
+    // Accepts both repeated occurrences (`--exclude a --exclude b`) and
+    // comma-delimited values (`--exclude a,b`); the collected patterns are
+    // OR-combined (a path is excluded if it matches ANY pattern). The doc
+    // comment is kept to a single line so `--help` output is byte-stable.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATTERN",
+        action = clap::ArgAction::Append,
+        value_delimiter = ','
+    )]
+    pub exclude: Vec<String>,
 
     /// Only include paths matching PATTERN.
-    #[arg(long, global = true, value_name = "PATTERN")]
-    pub paths: Option<String>,
+    // Accepts both repeated occurrences and comma-delimited values, matching
+    // `--exclude`'s arity. NOTE: this flag is currently UNWIRED — no `--paths`
+    // filtering is performed yet (wiring it is out of scope for this gate).
+    // Single-line doc comment keeps `--help` byte-stable.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATTERN",
+        action = clap::ArgAction::Append,
+        value_delimiter = ','
+    )]
+    pub paths: Vec<String>,
 
     /// Use symlinks instead of copies.
     #[arg(long, global = true)]
@@ -116,6 +136,20 @@ pub struct GlobalArgs {
     /// Context (directory or store) for catalog queries.
     #[arg(long, global = true, value_name = "DIR|STORE")]
     pub location: Option<String>,
+
+    /// Max concurrent object transfers (0/auto = number of CPUs, capped).
+    #[arg(
+        long,
+        short = 'j',
+        global = true,
+        value_name = "N",
+        env = "SNAPDIR_JOBS"
+    )]
+    pub jobs: Option<usize>,
+
+    /// Limit total transfer bandwidth, e.g. 10M, 512K, 1G (wget-style; aggregate across all transfers).
+    #[arg(long, global = true, value_name = "RATE", env = "SNAPDIR_LIMIT_RATE")]
+    pub limit_rate: Option<String>,
 }
 
 /// The `snapdir` subcommands, matching the Bash orchestrator one-for-one.
@@ -137,8 +171,15 @@ pub enum Command {
 
         /// Exclude paths matching the extended-regex PATTERN
         /// (supports the `%system%` / `%common%` macros).
-        #[arg(long, value_name = "PATTERN")]
-        exclude: Option<String>,
+        // Accepts both repeated occurrences and comma-delimited values,
+        // OR-combined (a path is excluded if it matches ANY pattern).
+        #[arg(
+            long,
+            value_name = "PATTERN",
+            action = clap::ArgAction::Append,
+            value_delimiter = ','
+        )]
+        exclude: Vec<String>,
 
         /// Directory to describe.
         path: Option<PathBuf>,
@@ -242,7 +283,13 @@ impl Cli {
                 exclude,
                 path,
             } => {
-                let exclude = exclude.as_deref().or(self.globals.exclude.as_deref());
+                // Precedence: the subcommand's `--exclude` list overrides the
+                // global one when non-empty, else fall back to the global list.
+                let exclude: &[String] = if exclude.is_empty() {
+                    &self.globals.exclude
+                } else {
+                    exclude
+                };
                 let manifest = self.build_manifest(
                     path.as_deref(),
                     *absolute,
@@ -272,8 +319,13 @@ impl Cli {
                 // b3sum of the comment-stripped manifest text. The wrapper
                 // walks with the default checksum (b3sum) and default
                 // path/follow modes; the id is checksum-mode independent here.
-                let exclude = self.globals.exclude.as_deref();
-                let manifest = self.build_manifest(path.as_deref(), false, false, None, exclude)?;
+                let manifest = self.build_manifest(
+                    path.as_deref(),
+                    false,
+                    false,
+                    None,
+                    &self.globals.exclude,
+                )?;
                 let id = snapshot_id(&manifest, &Blake3Hasher::new());
                 println!("{id}");
                 Ok(())
@@ -388,6 +440,7 @@ impl Cli {
     /// and push its objects (objects-before-manifest, skip-if-present) to the
     /// resolved store. Prints the resulting snapshot id, matching the oracle.
     fn run_push(&self, path: Option<&Path>) -> Result<()> {
+        self.log_transfer_config();
         let store = self.resolve_store()?;
 
         // `snapdir push --store … --id <id>` with no PATH: push a *staged* (or
@@ -402,10 +455,24 @@ impl Cli {
         // so `push --id` silently snapshotted the CWD instead of honoring `--id`.
         if path.is_none() && self.globals.id.is_some() {
             let id = self.require_id()?;
-            let cache = self.cache_store();
+            let cache = self.cache_store()?;
             let manifest = cache.get_manifest(id).with_context(|| {
                 format!("manifest {id} not found in the local cache; stage or fetch it first")
             })?;
+            let store_url = self
+                .globals
+                .store
+                .as_deref()
+                .context("missing --store option")?;
+            // Under --dryrun: the id is a pure read-only lookup, so still print
+            // it to stdout (the scriptable id-on-stdout contract). Skip the
+            // scratch materialize (it's discarded), the store push, and the
+            // catalog log — those are the only persistent writes.
+            if self.globals.dryrun {
+                println!("{id}");
+                eprintln!("dry-run: would push {id} to {store_url} (no writes performed)");
+                return Ok(());
+            }
             let scratch = ScratchDir::new("push")?;
             cache
                 .fetch_files(&manifest, scratch.path())
@@ -414,21 +481,28 @@ impl Cli {
                 .push(&manifest, scratch.path())
                 .with_context(|| format!("pushing snapshot {id} to store"))?;
             println!("{id}");
-            let store_url = self
-                .globals
-                .store
-                .as_deref()
-                .context("missing --store option")?;
             self.log_event("push", id, store_url)?;
             return Ok(());
         }
 
         // Push always uses the default checksum surface (b3sum / keyed-b3sum),
         // relative paths, follow symlinks — the same wiring `snapdir id` uses.
-        let manifest =
-            self.build_manifest(path, false, false, None, self.globals.exclude.as_deref())?;
+        let manifest = self.build_manifest(path, false, false, None, &self.globals.exclude)?;
         let root = resolve_root(path).context("resolving push path")?;
         let id = snapshot_id(&manifest, &Blake3Hasher::new());
+        let store_url = self
+            .globals
+            .store
+            .as_deref()
+            .context("missing --store option")?;
+        // Under --dryrun: the snapshot id is a pure read-only computation, so
+        // still print it to stdout. Skip the store push and the catalog log —
+        // the only persistent writes here.
+        if self.globals.dryrun {
+            println!("{id}");
+            eprintln!("dry-run: would push {id} to {store_url} (no writes performed)");
+            return Ok(());
+        }
         store
             .push(&manifest, &root)
             .with_context(|| format!("pushing snapshot {id} to store"))?;
@@ -438,11 +512,6 @@ impl Cli {
         // `revisions`/`ancestors` see it. Best-effort and only when the catalog
         // is enabled (`--catalog` / `SNAPDIR_CATALOG`), exactly like the oracle's
         // `_snapdir_log_event` no-op when no catalog adapter is configured.
-        let store_url = self
-            .globals
-            .store
-            .as_deref()
-            .context("missing --store option")?;
         self.log_event("push", &id, store_url)?;
         Ok(())
     }
@@ -452,11 +521,51 @@ impl Cli {
     /// each object's BLAKE3), then file the manifest+objects into the local
     /// cache so a later `checkout` can reconstruct the tree offline.
     fn run_fetch(&self) -> Result<()> {
+        self.log_transfer_config();
+        self.fetch_inner()
+    }
+
+    /// `fetch` body without the verbose transfer-config banner. `run_pull`
+    /// composes `fetch_inner` + `checkout_inner` so the banner prints exactly
+    /// once (from `run_pull`), not once per leg.
+    fn fetch_inner(&self) -> Result<()> {
+        // Fast path: if the local cache already holds the manifest, the whole
+        // snapshot is cached. By snapdir's manifest-written-last invariant a
+        // present manifest implies every object it references is present (the
+        // same invariant `FileStore::push`'s skip-if-manifest-present relies
+        // on), and `get_manifest` re-verifies the cached manifest hashes back
+        // to `id`, so this is a sound integrity gate. Skipping here means a
+        // repeat `fetch`/`pull` of the same id performs ZERO store reads — no
+        // network round-trip to re-download objects already on disk. The early
+        // return is itself write-free, so it composes cleanly with `--dryrun`.
+        //
+        // We only consult the cache when an `--id` is actually present; with no
+        // id there is nothing to look up, so we fall through and let the
+        // original store-resolution path surface the canonical "missing --store
+        // option" error first (preserving the frozen CLI error precedence).
+        let cache = self.cache_store()?;
+        if let Some(id) = self.globals.id.as_deref() {
+            if cache.get_manifest(id).is_ok() {
+                if self.globals.verbose {
+                    eprintln!("CACHED: {id}");
+                }
+                return Ok(());
+            }
+        }
+
         let store = self.resolve_store()?;
         let id = self.require_id()?;
         let manifest = store
             .get_manifest(id)
             .with_context(|| format!("fetching manifest {id} from store"))?;
+
+        // Under --dryrun: the manifest read is fine, but skip materializing the
+        // scratch tree (discarded) and the cache write — the only persistent
+        // write in fetch.
+        if self.globals.dryrun {
+            eprintln!("dry-run: would fetch {id} into the local cache (no writes performed)");
+            return Ok(());
+        }
 
         // Materialize the verified objects into a scratch tree, then push that
         // tree into the cache store. This reuses the store's verify/atomic
@@ -466,7 +575,6 @@ impl Cli {
             .fetch_files(&manifest, scratch.path())
             .with_context(|| format!("fetching objects for snapshot {id}"))?;
 
-        let cache = self.cache_store();
         cache
             .push(&manifest, scratch.path())
             .with_context(|| format!("saving snapshot {id} to the local cache"))?;
@@ -480,12 +588,32 @@ impl Cli {
     /// cache, materialize the tree at `<dest>`, and restore each entry's
     /// permissions so the checked-out tree re-manifests to the same snapshot id.
     fn run_checkout(&self, dir: Option<&Path>) -> Result<()> {
+        self.log_transfer_config();
+        self.checkout_inner(dir)
+    }
+
+    /// `checkout` body without the verbose transfer-config banner (see
+    /// [`Self::fetch_inner`]).
+    fn checkout_inner(&self, dir: Option<&Path>) -> Result<()> {
         let id = self.require_id()?;
-        let cache = self.cache_store();
+        let dest = resolve_root(dir).context("resolving checkout destination")?;
+        // Under --dryrun: skip materializing the destination tree and restoring
+        // permissions — both write to the destination. The notice is emitted
+        // before the cache manifest read so `pull --dryrun` (whose `fetch` leg
+        // is itself a dry no-op and therefore leaves the cache unpopulated)
+        // composes into a clean, write-free no-op rather than failing on a
+        // missing cached manifest.
+        if self.globals.dryrun {
+            eprintln!(
+                "dry-run: would check out {id} to {} (no writes performed)",
+                dest.display()
+            );
+            return Ok(());
+        }
+        let cache = self.cache_store()?;
         let manifest = cache.get_manifest(id).with_context(|| {
             format!("manifest {id} not found locally; did you forget to fetch it?")
         })?;
-        let dest = resolve_root(dir).context("resolving checkout destination")?;
         cache
             .fetch_files(&manifest, &dest)
             .with_context(|| format!("checking out snapshot {id} to {}", dest.display()))?;
@@ -495,8 +623,12 @@ impl Cli {
 
     /// `snapdir pull` = fetch + checkout.
     fn run_pull(&self, path: Option<&Path>) -> Result<()> {
-        self.run_fetch()?;
-        self.run_checkout(path)
+        // Banner ONCE for the whole pull, then run the two legs without their
+        // own banners (`fetch_inner`/`checkout_inner`) so `pull --verbose`
+        // emits exactly one transfer-config line.
+        self.log_transfer_config();
+        self.fetch_inner()?;
+        self.checkout_inner(path)
     }
 
     /// `snapdir verify --id <id>`: confirm the snapshot in the store is intact —
@@ -540,13 +672,20 @@ impl Cli {
     /// core/stores code. The resulting on-disk keys are exactly what
     /// `verify-cache` later checks (`stage` then `verify-cache` round-trips).
     fn run_stage(&self, path: Option<&Path>) -> Result<()> {
+        self.log_transfer_config();
         // Stage uses the same default checksum surface as `push`/`id`: b3sum
         // (or keyed-b3sum), relative paths, follow symlinks.
-        let manifest =
-            self.build_manifest(path, false, false, None, self.globals.exclude.as_deref())?;
+        let manifest = self.build_manifest(path, false, false, None, &self.globals.exclude)?;
         let root = resolve_root(path).context("resolving stage path")?;
         let id = snapshot_id(&manifest, &Blake3Hasher::new());
-        let cache = self.cache_store();
+        // Under --dryrun: the id is a pure read-only computation, so still print
+        // it to stdout. Skip the cache write and the catalog log.
+        if self.globals.dryrun {
+            println!("{id}");
+            eprintln!("dry-run: would stage {id} into the local cache (no writes performed)");
+            return Ok(());
+        }
+        let cache = self.cache_store()?;
         cache
             .push(&manifest, &root)
             .with_context(|| format!("staging snapshot {id} into the local cache"))?;
@@ -570,13 +709,21 @@ impl Cli {
     /// whether or not it was purged.
     fn run_verify_cache(&self) -> Result<()> {
         let cache_dir = self.cache_dir();
-        let report = cache::verify_cache(&cache_dir, self.globals.purge, &Blake3Hasher::new())
+        // `--purge` is FS-mutating (it deletes corrupt objects), so under
+        // --dryrun never purge — pass `false` so the verification is read-only —
+        // while still emitting the corruption report and preserving the
+        // non-zero exit below.
+        let purge = self.globals.purge && !self.globals.dryrun;
+        if self.globals.purge && self.globals.dryrun {
+            eprintln!("dry-run: would purge corrupt objects from the cache (no writes performed)");
+        }
+        let report = cache::verify_cache(&cache_dir, purge, &Blake3Hasher::new())
             .with_context(|| format!("verifying cache at {}", cache_dir.display()))?;
 
         for checksum in &report.corrupt {
             eprintln!("Checksum mismatch for {checksum}");
         }
-        if self.globals.purge && self.globals.verbose {
+        if purge && self.globals.verbose {
             for checksum in &report.purged {
                 eprintln!("purged {checksum}");
             }
@@ -596,6 +743,15 @@ impl Cli {
     /// (objects + manifests). Idempotent on an already-empty / missing cache.
     fn run_flush_cache(&self) -> Result<()> {
         let cache_dir = self.cache_dir();
+        // Under --dryrun: skip the destructive flush (it deletes every cached
+        // object + manifest).
+        if self.globals.dryrun {
+            eprintln!(
+                "dry-run: would flush the cache at {} (no writes performed)",
+                cache_dir.display()
+            );
+            return Ok(());
+        }
         cache::flush_cache(&cache_dir)
             .with_context(|| format!("flushing cache at {}", cache_dir.display()))?;
         Ok(())
@@ -737,13 +893,61 @@ impl Cli {
             .as_deref()
             .context("missing --store option")?;
         let adapter = resolve_adapter(store_url).context("resolving --store protocol")?;
-        store_for_adapter(&adapter, store_url)
+        let config = self.transfer_config()?;
+        store_for_adapter(&adapter, store_url, config)
+    }
+
+    /// Builds the [`TransferConfig`] from the global `--jobs` / `--limit-rate`
+    /// flags. `--jobs` unset or `0` falls back to the stores' auto-detected
+    /// default concurrency; `--limit-rate` unset means unlimited bandwidth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `--limit-rate` cannot be parsed as a byte rate.
+    fn transfer_config(&self) -> Result<TransferConfig> {
+        let max_bytes_per_sec = match self.globals.limit_rate.as_deref() {
+            Some(rate) => Some(parse_rate(rate)?),
+            None => None,
+        };
+        let concurrency = match self.globals.jobs {
+            Some(n) if n > 0 => n,
+            // Unset or 0 => auto (the stores' default).
+            _ => TransferConfig::default().concurrency.get(),
+        };
+        Ok(TransferConfig::new(concurrency, max_bytes_per_sec))
+    }
+
+    /// Field observability for the transfer commands: under `--verbose`, print
+    /// the *effective* transfer concurrency (and `--limit-rate`, if set) ONCE to
+    /// stderr so an operator can confirm in the field that concurrent transfers +
+    /// bandwidth limiting are actually in effect. Stdout is untouched (the
+    /// scriptable id-on-stdout contract stays byte-stable); the deterministic
+    /// concurrency proof is the unit test, this is just field observability.
+    fn log_transfer_config(&self) {
+        if !self.globals.verbose {
+            return;
+        }
+        // A bad --limit-rate would already have failed transfer_config() in the
+        // command body; here we only render for humans, so on the off chance the
+        // config can't resolve we simply skip the diagnostic rather than abort.
+        let Ok(config) = self.transfer_config() else {
+            return;
+        };
+        let concurrency = config.concurrency.get();
+        match self.globals.limit_rate.as_deref() {
+            Some(rate) => eprintln!("transfers: {concurrency} concurrent, limit {rate}"),
+            None => eprintln!("transfers: {concurrency} concurrent"),
+        }
     }
 
     /// The local cache as a `file://`-shaped store, rooted at the resolved cache
     /// directory. The cache uses the identical sharded layout as a `FileStore`.
-    fn cache_store(&self) -> FileStore {
-        FileStore::from_root(self.cache_dir())
+    /// Cache copies honor `--jobs` / `--limit-rate` via the [`TransferConfig`].
+    fn cache_store(&self) -> Result<FileStore> {
+        Ok(FileStore::from_root_with_config(
+            self.cache_dir(),
+            self.transfer_config()?,
+        ))
     }
 
     /// Resolves the cache directory: `--cache-dir`, else
@@ -770,23 +974,29 @@ impl Cli {
         absolute: bool,
         no_follow: bool,
         checksum_bin: Option<&str>,
-        exclude: Option<&str>,
+        exclude: &[String],
     ) -> Result<Manifest> {
         let root = resolve_root(path).context("resolving manifest path")?;
 
-        // Expand the exclude pattern. `%system%` forces no-follow; the runtime
-        // `$HOME/.cache/` + cache-dir values come from the CLI (core is
-        // env-pure). When no `--exclude` is given there is no filtering.
+        // Expand the exclude patterns. Each `--exclude` value is expanded
+        // independently — `%system%` / `%common%` macros must be expanded
+        // per-pattern, never on a raw `|`-joined string (that would split the
+        // macro tokens apart) — then OR-combined into a single ERE so a path is
+        // excluded if it matches ANY pattern. `%system%` forces no-follow; the
+        // runtime `$HOME/.cache/` + cache-dir values come from the CLI (core is
+        // env-pure). An empty list means no filtering. A single pattern is
+        // byte-identical to the previous single-pattern path: one expansion,
+        // wrapped in a `(?:…)` group, with no extra alternation.
         let (home_cache, cache_dir) = exclude_runtime_paths(self.globals.cache_dir.as_deref());
-        let expanded = expand_excludes(exclude.unwrap_or(""), &home_cache, &cache_dir);
-        let matcher = match &expanded.pattern {
+        let combined = combine_excludes(exclude, &home_cache, &cache_dir);
+        let matcher = match &combined.pattern {
             Some(pattern) => {
                 Some(ExcludeMatcher::new(pattern).context("compiling --exclude pattern")?)
             }
             None => None,
         };
 
-        let follow = if no_follow || expanded.forces_no_follow {
+        let follow = if no_follow || combined.forces_no_follow {
             FollowMode::NoFollow
         } else {
             FollowMode::Follow
@@ -834,12 +1044,16 @@ impl Cli {
 /// Kept as a free function (decoupled from `--store` parsing) so the
 /// scheme→store routing is exercised independently of CLI argument plumbing;
 /// the pure scheme→adapter decision itself lives in [`resolve_adapter`].
-fn store_for_adapter(adapter: &Adapter, store_url: &str) -> Result<Box<dyn Store>> {
+fn store_for_adapter(
+    adapter: &Adapter,
+    store_url: &str,
+    config: TransferConfig,
+) -> Result<Box<dyn Store>> {
     match adapter {
-        Adapter::File => Ok(Box::new(FileStore::new(store_url))),
+        Adapter::File => Ok(Box::new(FileStore::new_with_config(store_url, config))),
         Adapter::S3 => {
             let endpoint = std::env::var("SNAPDIR_S3_STORE_ENDPOINT_URL").ok();
-            let store = S3Store::connect(store_url, endpoint.as_deref())
+            let store = S3Store::connect_with(store_url, endpoint.as_deref(), config)
                 .with_context(|| format!("connecting to S3 store {store_url}"))?;
             Ok(Box::new(store))
         }
@@ -848,12 +1062,13 @@ fn store_for_adapter(adapter: &Adapter, store_url: &str) -> Result<Box<dyn Store
             let region = std::env::var("SNAPDIR_B2_REGION")
                 .or_else(|_| std::env::var("AWS_REGION"))
                 .ok();
-            let store = B2Store::connect(store_url, endpoint.as_deref(), region.as_deref())
-                .with_context(|| format!("connecting to B2 store {store_url}"))?;
+            let store =
+                B2Store::connect_with(store_url, endpoint.as_deref(), region.as_deref(), config)
+                    .with_context(|| format!("connecting to B2 store {store_url}"))?;
             Ok(Box::new(store))
         }
         Adapter::Gcs => {
-            let store = GcsStore::connect(store_url)
+            let store = GcsStore::connect_with(store_url, config)
                 .with_context(|| format!("connecting to GCS store {store_url}"))?;
             Ok(Box::new(store))
         }
@@ -863,6 +1078,59 @@ fn store_for_adapter(adapter: &Adapter, store_url: &str) -> Result<Box<dyn Store
             Ok(Box::new(store))
         }
     }
+}
+
+/// Parses a wget-style byte-rate string into bytes/second.
+///
+/// Accepts a bare integer (bytes), or a number with a binary-multiple suffix.
+/// Suffixes are case-insensitive and the trailing `i`/`B` letters are optional:
+/// `K`/`KB`/`KiB` = 1024, `M`/`MB`/`MiB` = 1024², `G`/`GB`/`GiB` = 1024³.
+/// Fractional values are supported (`1.5M` = 1572864). Surrounding whitespace
+/// is ignored.
+///
+/// # Errors
+///
+/// Returns an error for empty input, an unrecognized suffix, a non-numeric
+/// mantissa, or a negative value.
+fn parse_rate(s: &str) -> Result<u64> {
+    let trimmed = s.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "empty --limit-rate value");
+
+    // Split the numeric mantissa from the (optional) unit suffix.
+    let split = trimmed
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(trimmed.len());
+    let (num, suffix) = trimmed.split_at(split);
+    anyhow::ensure!(
+        !num.is_empty(),
+        "invalid --limit-rate '{s}': expected a number, optionally followed by K/M/G"
+    );
+
+    let value: f64 = num
+        .parse()
+        .with_context(|| format!("invalid --limit-rate '{s}': '{num}' is not a number"))?;
+    anyhow::ensure!(
+        value.is_finite() && value >= 0.0,
+        "invalid --limit-rate '{s}': must be a non-negative number"
+    );
+
+    // Normalize the suffix: strip an optional 'i' and an optional 'b'
+    // (case-insensitive) so K/KB/KiB all collapse to the same multiplier.
+    let unit = suffix.trim().to_ascii_lowercase();
+    let unit = unit.strip_suffix('b').unwrap_or(&unit);
+    let unit = unit.strip_suffix('i').unwrap_or(unit);
+    let multiplier: f64 = match unit {
+        "" => 1.0,
+        "k" => 1024.0,
+        "m" => 1024.0 * 1024.0,
+        "g" => 1024.0 * 1024.0 * 1024.0,
+        other => {
+            anyhow::bail!("invalid --limit-rate '{s}': unknown unit '{other}' (use K, M, or G)")
+        }
+    };
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok((value * multiplier) as u64)
 }
 
 /// Reformats a `SNAPDIR*` environment variable into the oracle's `defaults`
@@ -988,6 +1256,42 @@ fn resolve_root(path: Option<&Path>) -> Result<PathBuf> {
     Ok(cwd.join(raw))
 }
 
+/// OR-combines a list of `--exclude` patterns into a single expanded
+/// extended-regex, expanding the `%system%` / `%common%` macros **per pattern**.
+///
+/// The macros (e.g. `%system%`) expand to parenthesized alternations that
+/// embed `|` and `^` anchors, so the raw patterns must NOT be `|`-joined before
+/// expansion — that would split a macro token across an alternation boundary.
+/// Instead each pattern is run through [`expand_excludes`] on its own, each
+/// expanded result is wrapped in a non-capturing group `(?:…)`, and the groups
+/// are joined with `|`. `forces_no_follow` is the OR of every pattern's flag
+/// (any `%system%` anywhere forces no-follow).
+///
+/// An empty list yields `pattern: None` (no filtering), exactly as before. A
+/// single pattern produces `(?:<expansion>)`, which matches identically to the
+/// bare `<expansion>` the previous single-pattern path compiled — the
+/// non-capturing group changes grouping only, never the matched set.
+fn combine_excludes(patterns: &[String], home_cache: &str, cache_dir: &str) -> ExpandedExclude {
+    let mut groups: Vec<String> = Vec::new();
+    let mut forces_no_follow = false;
+    for pattern in patterns {
+        let expanded = expand_excludes(pattern, home_cache, cache_dir);
+        forces_no_follow |= expanded.forces_no_follow;
+        if let Some(ere) = expanded.pattern {
+            groups.push(format!("(?:{ere})"));
+        }
+    }
+    let pattern = if groups.is_empty() {
+        None
+    } else {
+        Some(groups.join("|"))
+    };
+    ExpandedExclude {
+        pattern,
+        forces_no_follow,
+    }
+}
+
 /// Resolves the runtime values the `%system%` macro interpolates: the
 /// `$HOME/.cache/` directory and the snapdir cache directory. Mirrors the
 /// oracle's `${HOME:-~}/.cache/` and `${XDG_CACHE_HOME:-$HOME/.cache}/snapdir`.
@@ -1045,7 +1349,12 @@ mod tests {
         // store is usable behind the trait object (a non-existent id is absent,
         // not an error other than ManifestNotFound semantics surfacing later).
         let adapter = resolve_adapter("file:///tmp/snapdir-routing-test").unwrap();
-        let store = store_for_adapter(&adapter, "file:///tmp/snapdir-routing-test").unwrap();
+        let store = store_for_adapter(
+            &adapter,
+            "file:///tmp/snapdir-routing-test",
+            TransferConfig::default(),
+        )
+        .unwrap();
         // get_manifest on a missing id must not panic; it returns an Err.
         assert!(store.get_manifest("0".repeat(64).as_str()).is_err());
     }
@@ -1059,12 +1368,99 @@ mod tests {
         let store = ExternalStore::new("xyz://bucket/base").unwrap();
         assert_eq!(store.binary(), Path::new("snapdir-xyz-store"));
         // store_for_adapter routes the same scheme through the shim.
-        let routed = store_for_adapter(&adapter, "xyz://bucket/base");
+        let routed = store_for_adapter(&adapter, "xyz://bucket/base", TransferConfig::default());
         assert!(routed.is_ok());
     }
 
     #[test]
     fn remote_store_routing_rejects_invalid_protocol() {
         assert!(resolve_adapter("NotAScheme://x").is_err());
+    }
+
+    /// Builds a `Cli` from args, forcing the transfer-tuning env vars unset so
+    /// the parse reflects ONLY the explicit flags (clap's `env` would otherwise
+    /// let a leaked `SNAPDIR_JOBS` / `SNAPDIR_LIMIT_RATE` perturb the result).
+    fn cli_with(args: &[&str]) -> Cli {
+        // SAFETY: tests in this module that touch these vars run in-process;
+        // we remove them before parsing so the flags alone drive the config.
+        unsafe {
+            std::env::remove_var("SNAPDIR_JOBS");
+            std::env::remove_var("SNAPDIR_LIMIT_RATE");
+        }
+        let mut full = vec!["snapdir"];
+        full.extend_from_slice(args);
+        // `defaults` is a no-arg subcommand, satisfying the required subcommand.
+        full.push("defaults");
+        Cli::try_parse_from(full).expect("parse cli")
+    }
+
+    #[test]
+    fn transfer_flags_parse_rate() {
+        assert_eq!(parse_rate("10M").unwrap(), 10_485_760);
+        assert_eq!(parse_rate("512K").unwrap(), 524_288);
+        assert_eq!(parse_rate("1G").unwrap(), 1_073_741_824);
+        assert_eq!(parse_rate("1GiB").unwrap(), 1_073_741_824);
+        assert_eq!(parse_rate("1GB").unwrap(), 1_073_741_824);
+        assert_eq!(parse_rate("1000").unwrap(), 1000);
+        assert_eq!(parse_rate("1.5M").unwrap(), 1_572_864);
+        assert_eq!(parse_rate("  2k ").unwrap(), 2048);
+        assert_eq!(parse_rate("1kib").unwrap(), 1024);
+
+        for bad in ["10X", "abc", "", "   ", "M", "1.2.3", "-5M"] {
+            assert!(parse_rate(bad).is_err(), "expected {bad:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn transfer_flags_jobs_explicit() {
+        let cfg = cli_with(&["--jobs", "4"]).transfer_config().unwrap();
+        assert_eq!(cfg.concurrency.get(), 4);
+        assert_eq!(cfg.max_bytes_per_sec, None);
+    }
+
+    #[test]
+    fn transfer_flags_jobs_one_is_sequential() {
+        let cfg = cli_with(&["--jobs", "1"]).transfer_config().unwrap();
+        assert_eq!(cfg.concurrency.get(), 1);
+    }
+
+    #[test]
+    fn transfer_flags_jobs_unset_is_auto() {
+        let cfg = cli_with(&[]).transfer_config().unwrap();
+        assert!(cfg.concurrency.get() >= 1 && cfg.concurrency.get() <= 16);
+        assert_eq!(
+            cfg.concurrency.get(),
+            TransferConfig::default().concurrency.get()
+        );
+    }
+
+    #[test]
+    fn transfer_flags_jobs_zero_is_auto() {
+        let cfg = cli_with(&["--jobs", "0"]).transfer_config().unwrap();
+        assert!(cfg.concurrency.get() >= 1 && cfg.concurrency.get() <= 16);
+        assert_eq!(
+            cfg.concurrency.get(),
+            TransferConfig::default().concurrency.get()
+        );
+    }
+
+    #[test]
+    fn transfer_flags_limit_rate_threads_into_config() {
+        let cfg = cli_with(&["--limit-rate", "1M"]).transfer_config().unwrap();
+        assert_eq!(cfg.max_bytes_per_sec, Some(1_048_576));
+
+        // The short `-j` alias works and pairs with --limit-rate.
+        let cfg = cli_with(&["-j", "2", "--limit-rate", "512K"])
+            .transfer_config()
+            .unwrap();
+        assert_eq!(cfg.concurrency.get(), 2);
+        assert_eq!(cfg.max_bytes_per_sec, Some(524_288));
+    }
+
+    #[test]
+    fn transfer_flags_bad_limit_rate_errors() {
+        assert!(cli_with(&["--limit-rate", "nope"])
+            .transfer_config()
+            .is_err());
     }
 }
