@@ -18,6 +18,11 @@
 //! - [`transfer`] ([`TransferConfig`], [`RateLimiter`], [`run_concurrent`]) —
 //!   the concurrency + bandwidth-limiting foundation each store carries via a
 //!   [`TransferConfig`] for the (later) concurrent transfer loops.
+//! - [`adaptive`] ([`AdaptiveGate`], [`AdaptiveController`]) — pure, injectable
+//!   adaptive control: a resizable concurrency permit pool (async + blocking)
+//!   plus a deterministic slow-start/AIMD controller that turns injected op
+//!   samples + system metrics into a concurrency limit and target byte-rate
+//!   (wiring into the live transfer loops is a later gate).
 //! - [`stream`] ([`StreamStore`]) — object/manifest-level, content-addressed,
 //!   verified read/write primitives (the foundation for store-to-store sync),
 //!   implemented for [`FileStore`], [`S3Store`], [`GcsStore`], and [`B2Store`].
@@ -28,6 +33,7 @@
 //!   [`BlockingRateLimiter`](transfer::BlockingRateLimiter); writes the manifest
 //!   last (all-or-nothing).
 
+pub mod adaptive;
 pub mod b2_store;
 pub(crate) mod fetch;
 pub mod file_store;
@@ -41,6 +47,10 @@ pub mod sync;
 pub mod transfer;
 pub(crate) mod util;
 
+pub use adaptive::{
+    p95_object_size, AdaptiveController, AdaptiveGate, AdaptivePolicy, ControllerDriver, Decision,
+    OpResult, OpSample,
+};
 pub use b2_store::B2Store;
 pub use file_store::FileStore;
 pub use gcs_store::{GcsLocation, GcsStore};
@@ -49,4 +59,7 @@ pub use s3_store::{S3Location, S3Store};
 pub use shim::ExternalStore;
 pub use stream::StreamStore;
 pub use sync::{sync_snapshot, SyncReport};
-pub use transfer::{run_concurrent, BlockingRateLimiter, RateLimiter, TransferConfig};
+pub use transfer::{
+    classify_error, run_adaptive, run_concurrent, AdaptivePolicy as TransferAdaptivePolicy,
+    BlockingRateLimiter, RateLimiter, TransferConfig,
+};
