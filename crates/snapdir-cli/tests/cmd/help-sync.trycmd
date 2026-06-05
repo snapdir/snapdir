@@ -1,12 +1,14 @@
 ```
-$ snapdir verify --help
-Verify the integrity of a staged snapshot
+$ snapdir sync --help
+Copy a snapshot (its manifest + objects) directly between two stores, streaming through memory — no local staging
 
-Usage: snapdir verify [OPTIONS]
+Usage: snapdir sync [OPTIONS] --from <STORE> --to <STORE>
 
 Options:
       --cache-dir <DIR>       Directory where the object cache is stored [env: SNAPDIR_CACHE_DIR=]
+      --from <STORE>          Source store URI: `protocol://location/path`
       --catalog <NAME>        Catalog adapter to use [env: SNAPDIR_CATALOG=]
+      --to <STORE>            Destination store URI: `protocol://location/path`
       --store <URI>           Store URI: `protocol://location/path`
       --id <ID>               Snapshot ID to operate on
       --exclude <PATTERN>     Exclude paths matching PATTERN

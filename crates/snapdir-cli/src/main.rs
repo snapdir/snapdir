@@ -7,6 +7,9 @@
 //! codes.
 
 mod cli;
+// The progress renderer engine, wired into every transfer command and gated by
+// the --no-progress/--quiet/--color flags.
+mod progress;
 
 use std::process::ExitCode;
 

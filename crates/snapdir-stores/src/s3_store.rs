@@ -49,9 +49,11 @@ use aws_smithy_http_client::Builder as HttpClientBuilder;
 use snapdir_core::manifest::Manifest;
 use snapdir_core::merkle::{Blake3Hasher, Hasher};
 use snapdir_core::store::{manifest_path, object_path, Store, StoreError};
+use snapdir_core::Meter;
 
 use crate::fetch::fetch_files_concurrent;
 use crate::push::{push_objects_concurrent, upload_object};
+use crate::stream::StreamStore;
 use crate::transfer::{RateLimiter, TransferConfig};
 
 use tokio::runtime::Runtime;
@@ -139,6 +141,10 @@ pub struct S3Store {
     location: S3Location,
     runtime: Arc<Runtime>,
     config: TransferConfig,
+    /// Optional progress meter; recorded into during transfers. `None` (the
+    /// default from every constructor) means zero recording and byte-identical
+    /// behavior. Set by the CLI via [`S3Store::with_meter`].
+    meter: Option<Arc<Meter>>,
 }
 
 impl S3Store {
@@ -201,6 +207,7 @@ impl S3Store {
             location,
             runtime: Arc::new(runtime),
             config,
+            meter: None,
         })
     }
 
@@ -217,7 +224,19 @@ impl S3Store {
             location,
             runtime: Arc::new(build_runtime()?),
             config: TransferConfig::default(),
+            meter: None,
         })
+    }
+
+    /// Attaches (or clears) an optional progress [`Meter`], rides alongside
+    /// [`config`](Self::transfer_config). The transfer paths record bytes-in /
+    /// bytes-out + per-object progress into it; `None` (the constructor default)
+    /// means zero recording and byte-identical behavior. The CLI sets this after
+    /// construction.
+    #[must_use]
+    pub fn with_meter(mut self, meter: Option<Arc<Meter>>) -> Self {
+        self.meter = meter;
+        self
     }
 
     /// The parsed bucket/prefix this store targets.
@@ -368,11 +387,19 @@ impl Store for S3Store {
         // write. S3 only injects the per-object download, preserving the
         // BLAKE3-verify + retry discipline of `fetch_verified`.
         let limiter = RateLimiter::new(self.config.max_bytes_per_sec);
+        let meter = self.meter.as_deref();
         self.runtime.block_on(async {
-            fetch_files_concurrent(manifest, dest, &self.config, &limiter, |entry| async {
-                let key = self.location.object_key(&entry.checksum);
-                self.fetch_verified(&key, &entry.checksum).await
-            })
+            fetch_files_concurrent(
+                manifest,
+                dest,
+                &self.config,
+                &limiter,
+                meter,
+                |entry| async {
+                    let key = self.location.object_key(&entry.checksum);
+                    self.fetch_verified(&key, &entry.checksum).await
+                },
+            )
             .await
         })
     }
@@ -387,6 +414,7 @@ impl Store for S3Store {
         // which also owns the shared read+verify) and the manifest-write
         // closure. A failed push writes NO manifest.
         let limiter = RateLimiter::new(self.config.max_bytes_per_sec);
+        let meter = self.meter.as_deref();
         self.runtime.block_on(async {
             // Skip-if-manifest-present pre-check: a present manifest implies all
             // its objects are present (we always write the manifest last).
@@ -398,6 +426,7 @@ impl Store for S3Store {
             push_objects_concurrent(
                 manifest,
                 &self.config,
+                meter,
                 |entry| {
                     let object_key = self.location.object_key(&entry.checksum);
                     upload_object(
@@ -405,6 +434,7 @@ impl Store for S3Store {
                         object_key,
                         source,
                         &limiter,
+                        meter,
                         |key| async move { self.key_exists(&key).await },
                         |key, bytes| async move { self.put_bytes(&key, bytes).await },
                     )
@@ -427,6 +457,70 @@ impl Store for S3Store {
             )
             .await
         })
+    }
+}
+
+impl StreamStore for S3Store {
+    fn has_object(&self, checksum: &str) -> Result<bool, StoreError> {
+        let key = self.location.object_key(checksum);
+        self.runtime.block_on(async { self.key_exists(&key).await })
+    }
+
+    fn get_object(&self, checksum: &str) -> Result<Vec<u8>, StoreError> {
+        let key = self.location.object_key(checksum);
+        let bytes = self.runtime.block_on(async {
+            self.get_bytes(&key)
+                .await?
+                .ok_or_else(|| StoreError::ObjectNotFound {
+                    checksum: checksum.to_owned(),
+                })
+        })?;
+
+        // Verify the downloaded blob hashes back to its content-address before
+        // returning it (corruption surfaces as `Integrity`, never bad bytes).
+        let actual = Blake3Hasher::new().hash_hex(&bytes);
+        if actual != checksum {
+            return Err(StoreError::Integrity {
+                address: format!("s3://{}/{key}", self.location.bucket),
+                expected: checksum.to_owned(),
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    fn put_object(&self, checksum: &str, bytes: Vec<u8>) -> Result<(), StoreError> {
+        // Verify BEFORE uploading: a blob whose bytes do not hash to `checksum`
+        // must never land at that content-address (nothing is stored).
+        let actual = Blake3Hasher::new().hash_hex(&bytes);
+        if actual != checksum {
+            return Err(StoreError::Integrity {
+                address: self.location.object_key(checksum),
+                expected: checksum.to_owned(),
+                actual,
+            });
+        }
+        let key = self.location.object_key(checksum);
+        self.runtime
+            .block_on(async { self.put_bytes(&key, bytes).await })
+    }
+
+    fn put_manifest(&self, id: &str, manifest: &Manifest) -> Result<(), StoreError> {
+        let key = self.location.manifest_key(id);
+        // Mirror the manifest-write tail of `push`: render the oracle's
+        // `echo "${manifest}"` bytes, verify they hash back to `id`, then PUT.
+        let mut text = manifest.to_string();
+        text.push('\n');
+        let actual = Blake3Hasher::new().hash_hex(text.as_bytes());
+        if actual != id {
+            return Err(StoreError::Integrity {
+                address: key,
+                expected: id.to_owned(),
+                actual,
+            });
+        }
+        self.runtime
+            .block_on(async { self.put_bytes(&key, text.into_bytes()).await })
     }
 }
 
