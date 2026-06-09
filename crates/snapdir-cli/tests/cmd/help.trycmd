@@ -36,6 +36,8 @@ Options:
 
       --store <URI>
           Store URI: `protocol://location/path`
+          
+          [env: SNAPDIR_STORE=]
 
       --id <ID>
           Snapshot ID to operate on
@@ -104,6 +106,18 @@ Options:
           Adaptive concurrency ceiling (only meaningful with `--adaptive`). When unset, defaults to the auto concurrency; clamped to a sane upper bound
           
           [env: SNAPDIR_MAX_JOBS=]
+
+      --max-retries <N>
+          Total retry attempts per network request, including the first (default 5)
+
+      --retry-base-ms <MS>
+          Base backoff delay in milliseconds for request retries (default 250)
+
+      --retry-max-ms <MS>
+          Maximum backoff delay in milliseconds for request retries (default 30000)
+
+      --max-requests <N>
+          Cap request rate (req/s); 0/unset uses the per-backend default
 
   -h, --help
           Print help (see a summary with '-h')

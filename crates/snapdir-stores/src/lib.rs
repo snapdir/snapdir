@@ -15,9 +15,18 @@
 //!   third-party `snapdir-<name>-store` binaries via the documented
 //!   `get-manifest-command` / `get-fetch-files-command` / `get-push-command`
 //!   contract.
+//! - [`limits`] ([`BackendLimits`], [`for_scheme`]) — the published per-backend
+//!   request-rate / bandwidth caps (rate caps only; no retry policy) keyed by
+//!   storage scheme, used to pace transfers under each provider's documented
+//!   limits.
 //! - [`transfer`] ([`TransferConfig`], [`RateLimiter`], [`run_concurrent`]) —
 //!   the concurrency + bandwidth-limiting foundation each store carries via a
 //!   [`TransferConfig`] for the (later) concurrent transfer loops.
+//! - [`retry`] ([`RetryPolicy`], [`retry_async`], [`retry_blocking`]) — a pure,
+//!   injectable full-jitter exponential-backoff engine (no real clock/sleep of
+//!   its own; the [`Jitter`] source and [`AsyncSleeper`]/[`BlockingSleeper`] are
+//!   injected). SDK-agnostic over an [`Attempt`] outcome; wiring into the
+//!   S3/GCS/B2 call sites is a later gate.
 //! - [`adaptive`] ([`AdaptiveGate`], [`AdaptiveController`]) — pure, injectable
 //!   adaptive control: a resizable concurrency permit pool (async + blocking)
 //!   plus a deterministic slow-start/AIMD controller that turns injected op
@@ -38,7 +47,9 @@ pub mod b2_store;
 pub(crate) mod fetch;
 pub mod file_store;
 pub mod gcs_store;
+pub mod limits;
 pub(crate) mod push;
+pub mod retry;
 pub mod router;
 pub mod s3_store;
 pub mod shim;
@@ -54,6 +65,11 @@ pub use adaptive::{
 pub use b2_store::B2Store;
 pub use file_store::FileStore;
 pub use gcs_store::{GcsLocation, GcsStore};
+pub use limits::{for_scheme, BackendLimits};
+pub use retry::{
+    parse_retry_after, retry_async, retry_blocking, retry_network, AsyncSleeper, Attempt,
+    BlockingSleeper, DefaultJitter, FixedJitter, Jitter, RetryPolicy, ThreadSleeper, TokioSleeper,
+};
 pub use router::{resolve_adapter, Adapter, RouteError};
 pub use s3_store::{S3Location, S3Store};
 pub use shim::ExternalStore;
