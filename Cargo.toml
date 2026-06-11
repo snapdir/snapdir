@@ -5,27 +5,28 @@ members = [
     "crates/snapdir-catalog",
     "crates/snapdir-stores",
     "crates/snapdir-cli",
+    "crates/snapdir",
     "crates/snapdir-ssh-store",
     "benches",
 ]
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.91.1"
 authors = ["Bermi Ferrer <bermi@bermilabs.com>"]
 license = "MIT"
 repository = "https://github.com/snapdir/snapdir"
-homepage = "https://github.com/snapdir/snapdir"
+homepage = "https://snapdir.org"
 description = "Content-addressable directory snapshots — Rust port of snapdir."
 keywords = ["snapshot", "content-addressable", "blake3", "backup"]
 categories = ["command-line-utilities", "filesystem"]
 
 [workspace.dependencies]
 # Internal crates
-snapdir-core = { path = "crates/snapdir-core", version = "1.5.0" }
-snapdir-catalog = { path = "crates/snapdir-catalog", version = "1.5.0" }
-snapdir-stores = { path = "crates/snapdir-stores", version = "1.5.0" }
+snapdir-core = { path = "crates/snapdir-core", version = "1.6.0" }
+snapdir-catalog = { path = "crates/snapdir-catalog", version = "1.6.0" }
+snapdir-stores = { path = "crates/snapdir-stores", version = "1.6.0" }
 
 # Errors: thiserror in libs, anyhow (+ context) in the bin.
 thiserror = "2"

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-06-11
+
+### Added
+
+- **`snapdir` crate: `cargo install snapdir` installs the CLI.** The flagship
+  `snapdir` crate name on crates.io now ships the `snapdir` binary (a thin
+  shim over the `snapdir-cli` implementation library), so the install command
+  matches the binary name.
+
+### Changed
+
+- **`snapdir-cli` is now the implementation library.** The `snapdir` binary
+  moved to the new `snapdir` crate; `snapdir-cli` keeps publishing and exposes
+  `snapdir_cli::run()` — the binary entrypoint, not a semver-stable
+  general-purpose API. Versions ≤ 1.5.0 of `snapdir-cli` are unaffected and
+  still install the binary directly.
+
 ## [1.5.0] — 2026-06-10
 
 ### Added
@@ -331,7 +348,8 @@ Bash-written caches and remote buckets stay mutually readable.
   `gcloud`) in the shipped binary. External tools are used only by the test
   suite.
 
-[Unreleased]: https://github.com/snapdir/snapdir/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/snapdir/snapdir/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/snapdir/snapdir/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/snapdir/snapdir/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/snapdir/snapdir/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/snapdir/snapdir/compare/v1.2.0...v1.3.0
