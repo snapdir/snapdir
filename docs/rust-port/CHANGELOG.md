@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+## [1.7.0] - 2026-06-14
+
+### Added
+
+- **`--walk-jobs <N>` / `$SNAPDIR_WALK_JOBS` — parallel, memory-mapped directory
+  walk and file hashing.** Snapshotting a tree now hashes files across a bounded
+  rayon pool and uses blake3's memory-mapped path for large files, so `id`,
+  `manifest`, `stage`, and `push` no longer hash every file single-threaded —
+  multiple× faster on large trees. The new global `--walk-jobs <N>` flag (and
+  `$SNAPDIR_WALK_JOBS` env) sizes the walk pool; `0`/auto picks the number of
+  CPUs (capped). This is **distinct from `--jobs` / `$SNAPDIR_JOBS`** (which
+  controls transfer concurrency). Purely a performance win: **snapshot ids are
+  unchanged (byte-identical)** with the feature on or off and across every
+  `--walk-jobs` value — additive, default behavior preserved, the frozen
+  manifest format untouched.
+- **Cross-platform copy-on-write object clones — macOS (APFS `clonefile`) and
+  Linux (`FICLONE` reflink).** When the source file and the snapdir store share
+  a copy-on-write-capable filesystem, object copies during `stage`, `push`, and
+  `checkout`/`fetch` now make a CoW clone instead of byte-copying: on macOS via
+  `clonefile(2)` on the same APFS volume, and on Linux via the `FICLONE` ioctl
+  reflink on Btrfs, XFS (`reflink=1`), OpenZFS 2.2+, OCFS2, and bcachefs. A
+  large object is materialized for ~zero additional physical bytes (the clone
+  shares extents) and without rewriting its data. This is additive and falls
+  back gracefully to a plain `fs::copy` everywhere a reflink/clone cannot apply
+  — non-CoW filesystems (ext4, F2FS, tmpfs), across filesystem boundaries, and
+  on unsupported platforms. Set `SNAPDIR_CLONEFILE=0` to disable the fast-path
+  entirely. Object bytes and snapshot ids are unchanged (byte-identical) with
+  the fast-path on or off.
+- **Clone fast-path now skips the redundant post-copy re-hash — a real
+  `stage`/`checkout` speedup on both platforms.** Previously, even when an
+  object was cloned copy-on-write, `persist()` re-read and re-hashed the result,
+  so the clone saved disk space but not wall-clock time (the copy was never the
+  bottleneck; the second full read was). The clone path now elides that
+  redundant re-hash, turning the copy-on-write fast-path into a genuine speedup
+  — multiple× faster `stage` and meaningfully faster `checkout` on large trees
+  wherever a CoW clone fires, on macOS (APFS `clonefile`) or Linux (`FICLONE`
+  reflink) alike. Correctness is preserved on two layers: **`stage`
+  uses stat-validated trust** — the walk records the source file's stat and
+  `persist` re-stats it at clone time, skipping the re-hash only if the source
+  is unchanged since the walk (a changed source falls back to a full re-hash, so
+  a mid-stage mutation is caught at write time); **`checkout` still verifies the
+  source object once** (so on-disk object corruption is still detected) and only
+  skips the redundant destination re-hash. Set **`SNAPDIR_VERIFY_COPIES=1`** to
+  force the strict write-time re-hash even on the clone path. Object bytes and
+  snapshot ids remain byte-identical, and the read-time BLAKE3 verification in
+  `get_object`/`fetch` remains the integrity backstop regardless of this
+  setting.
+- **`--objects-store` / `$SNAPDIR_OBJECTS_STORE` — shared object pool, separate
+  manifest locations.** This global flag routes content objects to one shared
+  pool's `.objects/` while manifests go to `--store`'s `.manifests/`, so a
+  scheduled inventory can write a fresh manifest path per run (by date / host /
+  env) against a single deduplicated object pool. Re-pushing to the same pool
+  only costs the changed bytes — unchanged content-addressed objects are
+  skipped. Both halves resolve in-process; an external `custom://` store is
+  rejected on either side. Unset leaves behavior byte-for-byte unchanged; the
+  catalog records the `--store` (manifest-side) URI.
+- **`snapdir sync --from-objects/--to-objects` — split object pools for
+  bucket-to-bucket sync.** Each side names its own explicit object pool, so the
+  source and destination can be different buckets; the streaming sync engine is
+  unchanged, and objects already present in the destination pool are skipped
+  (cross-pool dedup). These per-side flags are distinct from the global
+  `--objects-store`; a side that omits its flag is a plain colocated store.
+- **`snapdir diff` — file-level diff across manifest locations, reading
+  manifests only.** Compares two sides, each a union of one-or-more manifest
+  refs (`--from`/`--to`, both repeatable), classifying every path as `A` (added),
+  `D` (deleted), or `M` (modified). It reads manifests only — it never downloads
+  an object — so it stays cheap over large or unreachable object pools, which
+  makes it well suited to comparing scheduled inventories. With the global
+  `--id` a side pins to a single manifest. Flags: `--all` (also emit unchanged
+  `=` paths), `--json` (a `{status, path}` array instead of porcelain
+  `X\t./path` lines), `--exit-code` (git `diff --exit-code` semantics: exit `1`
+  on any difference), and `--on-conflict <error|last-wins>` (intra-side
+  same-path/differing-content collision policy; defaults to `error`).
+- **SNAPPACK 1Z — auto-negotiated zstd transport for the `ssh://` accelerated
+  pack stream.** The whole post-magic pack body is sent as a single zstd frame
+  of the unchanged SNAPPACK 1 record grammar; the receiver sniffs the magic
+  (`SNAPPACK 1Z\n`) and accepts both v1 and 1Z forever. Compression is additive
+  (the wire version stays `1`; a new `snappack-zstd` capability token gates it),
+  so it engages only when both ends advertise support — a mixed-version pair
+  falls back to v1 with the v1 acceleration still taken. The level defaults to
+  zstd level 3 and is tunable via `SNAPDIR_SSH_ZSTD_LEVEL` (`1`–`19`, clamped).
+  Every decompressed byte is still BLAKE3-verified and the existing
+  header/manifest bounds apply to the decompressed stream, so a decompression
+  bomb costs CPU only. With SNAPPACK now compressing above the transport,
+  prefer `Compression=no` on the SSH client (WAN / HPN-SSH) to avoid
+  double-compressing.
+- **`SNAPDIR_FSYNC` crash-durability knob on `receive-pack`.** Defaults to
+  `batch`: all received objects are fsynced before the manifest is committed
+  last, so a manifest that survives a crash is backed by durable objects (the
+  manifest-last invariant holds across the crash boundary). `off` skips the
+  barrier and relies on the OS to flush; any other value is a hard error. On a
+  journaling filesystem this matches the crash-consistency guarantee git
+  provides, and claims no more than that. Measured cost: the `batch` default
+  adds ~20% on a small-files receive (v1 +19.5% / zstd +29.9% on a 5,000 ×
+  4 KiB push, Linux CI) — a fixed per-object fsync cost on the receive-pack
+  path only, accepted as the crash-safe default with `SNAPDIR_FSYNC=off` as
+  the opt-out.
+
 ## [1.6.0] — 2026-06-11
 
 ### Added
@@ -247,11 +347,12 @@ finalized.
   retiring the Bash implementation, dependency-cooldown policy, and more).
 - **Rust golden-format contract** — `crates/snapdir-core/tests/compat_golden.rs`
   pins the exact manifest line bytes, directory merkle checksums, and snapshot
-  IDs as golden constants, replacing the live comparison against the Bash version
-  as the guarantor of byte-format stability. Any accidental change to the line
-  format, ordering, checksum algorithm, sharded layout, or exclude sets fails the
-  golden tests.
-- **Local pre-push CI hook** (`utils/ci/pre-push.sh`, installed via
+  IDs as golden constants, replacing the live differential comparison as the
+  guarantor of byte-format stability.
+- **`manifest-format.sha.lock` tripwire** over the format-defining source, so any
+  accidental change to the line format, ordering, checksum algorithm, sharded
+  layout, or exclude sets trips CI and demands an explicit, reviewed bump.
+- **Local pre-push CI gate** (`utils/ci/pre-push.sh`, installed via
   `make install-hooks`) running the fast CI legs (~2–4 min) before every push;
   the slow musl + coverage legs run in CI and via `make ci-local`.
 - **`scratch` Docker image** — a `FROM scratch` final stage shipping only the
@@ -269,9 +370,9 @@ finalized.
 ### Removed
 
 - **The legacy Bash implementation was removed.** Its role as the behavioral
-  source of truth is now served by the Rust golden-format tests. The shipped
-  binary remains fully in-process with no runtime dependency on external
-  executables.
+  source of truth is now served by the Rust golden-format tests and the
+  `manifest-format.sha.lock` tripwire. The shipped binary remains fully
+  in-process with no runtime dependency on external executables.
 
 ## [0.5.0] — Rust port
 
@@ -309,12 +410,12 @@ Bash-written caches and remote buckets stay mutually readable.
 - **`file://` FileStore** with the sharded `.objects`/`.manifests` layout,
   objects-before-manifest push (skip-if-present), and verified fetch
   (temp download → BLAKE3 verify → retry ≤5 → atomic rename).
-- **Interop verification** proving byte-identical manifests and snapshot IDs
-  Bash↔Rust across every checksum/keyed/no-follow mode, plus live cross-tool
-  checks for S3 (MinIO) and GCS.
+- **Differential interop harness** (`tests/interop/run.sh`) proving byte-identical
+  manifests and snapshot IDs Bash↔Rust across every checksum/keyed/no-follow
+  mode, plus live cross-tool harnesses for S3 (MinIO) and GCS.
 - **Performance**: in-process walk + BLAKE3 makes the Rust `manifest` command
   ~33.6× faster on many-small files and ~2.69× faster on few-large files than the
-  Bash version, with byte-identical output.
+  Bash oracle, with byte-identical output.
 
 ### Changed
 
@@ -345,10 +446,11 @@ Bash-written caches and remote buckets stay mutually readable.
 ### Removed
 
 - No runtime dependency on external binaries (`b3sum`, `sqlite3`, `aws`, `b2`,
-  `gcloud`) in the shipped binary. External tools are used only by the test
-  suite.
+  `gcloud`) in the shipped binary. External tools are used only by the test/oracle
+  harness.
 
-[Unreleased]: https://github.com/snapdir/snapdir/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/snapdir/snapdir/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/snapdir/snapdir/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/snapdir/snapdir/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/snapdir/snapdir/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/snapdir/snapdir/compare/v1.3.0...v1.4.0

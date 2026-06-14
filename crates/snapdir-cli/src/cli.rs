@@ -20,21 +20,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::progress::{should_render, use_color, ColorChoice, ProgressReporter};
 use snapdir_catalog::{
     ancestors_json_line, locations_json_line, revisions_json_line, Catalog, SystemClock,
 };
+use snapdir_core::hash_file::HashFile;
 use snapdir_core::{
-    cache, expand_excludes, snapshot_id, walk_with_meter, Blake3Hasher, Blake3KeyedHasher,
-    ExcludeMatcher, ExpandedExclude, FollowMode, Hasher, Manifest, ManifestEntry, Md5Hasher, Meter,
-    PathMode, PathType, Phase, Sha256Hasher, Store, StoreError, WalkOptions,
+    cache, expand_excludes, snapshot_id, walk_with_guards, walk_with_meter, Blake3Hasher,
+    Blake3KeyedHasher, CopyGuard, ExcludeMatcher, ExpandedExclude, FollowMode, Hasher, Manifest,
+    ManifestEntry, Md5Hasher, Meter, PathMode, PathType, Phase, Sha256Hasher, Store, StoreError,
+    WalkOptions,
 };
 use snapdir_stores::{
-    is_hex64, limits, read_pack, resolve_adapter, write_pack, Adapter, B2Store, ExternalStore,
-    FileSink, FileStore, GcsStore, PackReadReport, PackSink, RetryPolicy, S3Store, StreamSink,
-    StreamStore, TransferAdaptivePolicy, TransferConfig, WIRE_CAPS, WIRE_VERSION,
+    is_hex64, limits, read_pack, resolve_adapter, write_pack_with_format, Adapter, B2Store,
+    Durability, ExternalStore, FileSink, FileStore, GcsStore, PackFormat, PackReadReport, PackSink,
+    RetryPolicy, S3Store, SplitStore, StreamSink, StreamStore, TransferAdaptivePolicy,
+    TransferConfig, DEFAULT_ZSTD_LEVEL, WIRE_CAPS, WIRE_VERSION,
 };
 
 /// Upper bound for the adaptive concurrency ceiling (`--max-jobs` / `--jobs`
@@ -83,6 +86,11 @@ pub struct GlobalArgs {
     /// Store URI: `protocol://location/path`.
     #[arg(long, global = true, value_name = "URI", env = "SNAPDIR_STORE")]
     pub store: Option<String>,
+
+    /// Shared object-pool store URI: when set, content OBJECTS route to this
+    /// pool's `.objects/` while MANIFESTS route to `--store`'s `.manifests/`.
+    #[arg(long, global = true, value_name = "URI", env = "SNAPDIR_OBJECTS_STORE")]
+    pub objects_store: Option<String>,
 
     /// Snapshot ID to operate on.
     #[arg(long, global = true, value_name = "ID")]
@@ -170,6 +178,11 @@ pub struct GlobalArgs {
     )]
     pub jobs: Option<usize>,
 
+    /// Max parallel file-hashing jobs during the directory walk (0/auto =
+    /// number of CPUs, capped). Distinct from --jobs (transfer concurrency).
+    #[arg(long, global = true, value_name = "N", env = "SNAPDIR_WALK_JOBS")]
+    pub walk_jobs: Option<usize>,
+
     /// Limit total transfer bandwidth, e.g. 10M, 512K, 1G (wget-style; aggregate across all transfers).
     #[arg(long, global = true, value_name = "RATE", env = "SNAPDIR_LIMIT_RATE")]
     pub limit_rate: Option<String>,
@@ -212,6 +225,68 @@ pub struct GlobalArgs {
     /// Cap request rate (req/s); 0/unset uses the per-backend default.
     #[arg(long, global = true, value_name = "N")]
     pub max_requests: Option<u64>,
+}
+
+/// CLI selector for the SNAPPACK transport encoding `send-pack` emits.
+///
+/// Mirrors [`PackFormat`] one-for-one but stays a CLI-layer type: clap derives
+/// `--pack-format <v1|zstd>` from it (the value-enum tokens are the lowercase
+/// variant names), and [`PackFormatArg::resolve`] maps it to the library
+/// [`PackFormat`], reading the zstd level from the environment at this seam (the
+/// library itself is env-free). The default is [`PackFormatArg::V1`], so an
+/// invocation that omits the hidden flag emits the historical byte-identical v1
+/// stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PackFormatArg {
+    /// Plain `SNAPPACK 1` — the historical byte-for-byte form (default).
+    V1,
+    /// `SNAPPACK 1Z` — the additive zstd-framed form.
+    Zstd,
+}
+
+impl PackFormatArg {
+    /// Maps the CLI selector to the library [`PackFormat`], reading the zstd
+    /// level from `SNAPDIR_SSH_ZSTD_LEVEL` (defaulting to [`DEFAULT_ZSTD_LEVEL`])
+    /// for the `zstd` form. The level is passed through to
+    /// [`PackFormat::Zstd`], which clamps it into the valid range; a malformed
+    /// env value falls back to the default rather than erroring, mirroring the
+    /// oracle's permissive numeric-env handling.
+    fn resolve(self) -> PackFormat {
+        match self {
+            Self::V1 => PackFormat::V1,
+            Self::Zstd => {
+                let level = std::env::var("SNAPDIR_SSH_ZSTD_LEVEL")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<i32>().ok())
+                    .unwrap_or(DEFAULT_ZSTD_LEVEL);
+                PackFormat::Zstd(level)
+            }
+        }
+    }
+}
+
+/// CLI selector for the intra-side collision policy of `snapdir diff`.
+///
+/// Mirrors [`crate::diff::OnConflict`]; clap derives `--on-conflict
+/// <error|last-wins>` from it. The default is [`OnConflictArg::Error`], so an
+/// omitted flag fails hard on a differing-content path collision within one
+/// side (the SPEC default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OnConflictArg {
+    /// A differing-content collision is a hard error (default).
+    Error,
+    /// The last ref contributing the path wins.
+    LastWins,
+}
+
+impl OnConflictArg {
+    /// Maps the CLI selector to the library [`crate::diff::OnConflict`].
+    fn resolve(self) -> crate::diff::OnConflict {
+        match self {
+            Self::Error => crate::diff::OnConflict::Error,
+            Self::LastWins => crate::diff::OnConflict::LastWins,
+        }
+    }
 }
 
 /// The `snapdir` subcommands, matching the Bash orchestrator one-for-one.
@@ -310,6 +385,49 @@ pub enum Command {
         /// Destination store URI: `protocol://location/path`.
         #[arg(long, value_name = "STORE")]
         to: String,
+        /// Explicit SOURCE object pool URI (split source): objects are read from
+        /// here while manifests come from `--from`. Absent => `--from` is a plain
+        /// colocated store. Distinct from the global `--objects-store`.
+        #[arg(long, value_name = "URI")]
+        from_objects: Option<String>,
+        /// Explicit DESTINATION object pool URI (split dest): objects are written
+        /// here while manifests go to `--to`. Absent => `--to` is a plain
+        /// colocated store. Distinct from the global `--objects-store`.
+        #[arg(long, value_name = "URI")]
+        to_objects: Option<String>,
+    },
+
+    /// Compare two sides, each a set of manifests, reporting file-level
+    /// differences — reading MANIFESTS ONLY.
+    Diff {
+        /// FROM-side ref: a manifest-store URI (enumerated) and/or, with the
+        /// global `--id`, a single pinned manifest. Repeatable; refs are
+        /// UNIONED into the FROM side.
+        #[arg(long, value_name = "REF", action = clap::ArgAction::Append)]
+        from: Vec<String>,
+
+        /// TO-side ref: a manifest-store URI (enumerated) and/or a pinned
+        /// manifest. Repeatable; refs are UNIONED into the TO side.
+        #[arg(long, value_name = "REF", action = clap::ArgAction::Append)]
+        to: Vec<String>,
+
+        /// Also emit unchanged (equal) paths.
+        #[arg(long)]
+        all: bool,
+
+        /// Emit a JSON array of `{status, path}` objects instead of porcelain.
+        #[arg(long)]
+        json: bool,
+
+        /// Exit 1 when any difference is found (git `diff --exit-code`
+        /// semantics); the default exits 0 regardless.
+        #[arg(long)]
+        exit_code: bool,
+
+        /// Policy for an intra-side path collision (same path, differing
+        /// content unioned on one side).
+        #[arg(long, value_name = "POLICY", value_enum, default_value_t = OnConflictArg::Error)]
+        on_conflict: OnConflictArg,
     },
 
     /// Print the version.
@@ -365,7 +483,8 @@ pub enum Command {
     /// Hidden wire plumbing: the sending half of
     /// `snapdir send-pack | ssh host 'snapdir receive-pack'`. Any failure —
     /// including a missing object — aborts BEFORE the `end` trailer
-    /// ([`write_pack`]), so a consumer of the partial stream fails too.
+    /// ([`write_pack_with_format`]), so a consumer of the partial stream fails
+    /// too.
     #[command(hide = true)]
     SendPack {
         /// File listing one object checksum per line (`-` reads stdin).
@@ -375,6 +494,19 @@ pub enum Command {
         /// Snapshot id whose manifest rides the pack as the LAST record.
         #[arg(long, value_name = "ID")]
         manifest_id: Option<String>,
+
+        /// On-wire SNAPPACK transport encoding to emit.
+        ///
+        /// HIDDEN + defaults to `v1`, so an old `send-pack` invocation stays
+        /// BYTE-IDENTICAL (same magic, same body, same `--help` surface). `zstd`
+        /// opts into the additive `SNAPPACK 1Z` form (same record grammar, whole
+        /// body in one zstd frame); the receiver sniffs the magic and accepts
+        /// either form, so there is no negotiation flag on `receive-pack`. The
+        /// compression level is the library default ([`DEFAULT_ZSTD_LEVEL`]),
+        /// overridable via `SNAPDIR_SSH_ZSTD_LEVEL` (the library is env-free, so
+        /// the level env is read HERE in the CLI seam).
+        #[arg(long, value_name = "FORMAT", value_enum, default_value_t = PackFormatArg::V1, hide = true)]
+        pack_format: PackFormatArg,
     },
 
     /// Consume a SNAPPACK stream from stdin into the store.
@@ -492,7 +624,20 @@ impl Cli {
                 Ok(())
             }
             Command::Defaults => run_defaults(),
-            Command::Sync { from, to } => self.run_sync(from, to),
+            Command::Sync {
+                from,
+                to,
+                from_objects,
+                to_objects,
+            } => self.run_sync(from, to, from_objects.as_deref(), to_objects.as_deref()),
+            Command::Diff {
+                from,
+                to,
+                all,
+                json,
+                exit_code,
+                on_conflict,
+            } => self.run_diff(from, to, *all, *json, *exit_code, on_conflict.resolve()),
             Command::Completions { shell } => {
                 // Build-time hook: emit the requested shell's completion script
                 // to stdout for the release pipeline to bundle. The bin name is
@@ -509,9 +654,11 @@ impl Cli {
                 Ok(())
             }
             Command::ObjectsNeeded => self.run_objects_needed(),
-            Command::SendPack { ids, manifest_id } => {
-                self.run_send_pack(ids, manifest_id.as_deref())
-            }
+            Command::SendPack {
+                ids,
+                manifest_id,
+                pack_format,
+            } => self.run_send_pack(ids, manifest_id.as_deref(), pack_format.resolve()),
             Command::ReceivePack { require_manifest } => {
                 self.run_receive_pack(require_manifest.as_deref())
             }
@@ -949,8 +1096,12 @@ impl Cli {
             m.set_phase(Phase::Hashing);
         }
         // Stage uses the same default checksum surface as `push`/`id`: b3sum
-        // (or keyed-b3sum), relative paths, follow symlinks.
-        let manifest = self.build_manifest(
+        // (or keyed-b3sum), relative paths, follow symlinks. We take the walk's
+        // CopyGuard side channel too: setting it on the cache FileStore lets
+        // `persist` stat-validate each unchanged source and SKIP the redundant
+        // post-copy re-hash (the stage clone-skip win). The guard map never
+        // changes the manifest, the object bytes, or the snapshot id.
+        let (manifest, copy_guards) = self.build_manifest_with_guards(
             path,
             false,
             false,
@@ -974,7 +1125,14 @@ impl Cli {
             m.set_total(total_object_bytes(&manifest));
             m.set_phase(Phase::Transfer);
         }
-        let cache = self.cache_store_with_meter(meter.clone())?;
+        // The walk's guard map is keyed by each plain regular file's absolute
+        // working-tree path (`root.join(rel)`); `push` looks up
+        // `source.join(rel)` with `source == root`, so the keys align exactly
+        // and the StatGuarded clone-skip engages. An empty/missing guard for a
+        // source ⇒ `Untrusted` ⇒ today's re-hash behavior.
+        let cache = self
+            .cache_store_with_meter(meter.clone())?
+            .with_copy_guards(copy_guards);
         cache
             .push(&manifest, &root)
             .with_context(|| format!("staging snapshot {id} into the local cache"))?;
@@ -1177,6 +1335,13 @@ impl Cli {
     /// the concrete store cannot be constructed (e.g. credentials/region cannot
     /// be resolved for a remote backend).
     fn resolve_store(&self, meter: Option<Arc<Meter>>) -> Result<Box<dyn Store>> {
+        // When `--objects-store` is set, objects route to the shared pool and
+        // manifests to `--store` via an in-process `SplitStore`. When absent the
+        // store is the colocated `--store` exactly as before — byte-for-byte
+        // unchanged.
+        if self.globals.objects_store.is_some() {
+            return Ok(Box::new(self.resolve_split_store(meter)?));
+        }
         let store_url = self
             .globals
             .store
@@ -1185,6 +1350,38 @@ impl Cli {
         let adapter = resolve_adapter(store_url).context("resolving --store protocol")?;
         let config = self.transfer_config_for(Some(adapter.name()))?;
         store_for_adapter(&adapter, store_url, config, meter)
+    }
+
+    /// Builds the `SplitStore` for a split push/fetch/pull: objects go to the
+    /// `--objects-store` pool, manifests to `--store`. BOTH sides are built via
+    /// [`stream_store_for_adapter`], so an external `custom://` on EITHER side is
+    /// rejected with the same actionable error class `sync` uses. `--store`
+    /// missing → a clear error (not a panic).
+    ///
+    /// Only called when `--objects-store` is set.
+    fn resolve_split_store(&self, meter: Option<Arc<Meter>>) -> Result<SplitStore> {
+        let objects_url = self
+            .globals
+            .objects_store
+            .as_deref()
+            .context("missing --objects-store option")?;
+        let store_url = self.globals.store.as_deref().context(
+            "missing --store option: --objects-store sets the object pool, but the manifest \
+             location (--store / $SNAPDIR_STORE) is still required",
+        )?;
+
+        let objects_adapter =
+            resolve_adapter(objects_url).context("resolving --objects-store protocol")?;
+        let objects_config = self.transfer_config_for(Some(objects_adapter.name()))?;
+        let objects =
+            stream_store_for_adapter(&objects_adapter, objects_url, objects_config, meter.clone())?;
+
+        let manifests_adapter = resolve_adapter(store_url).context("resolving --store protocol")?;
+        let manifests_config = self.transfer_config_for(Some(manifests_adapter.name()))?;
+        let manifests =
+            stream_store_for_adapter(&manifests_adapter, store_url, manifests_config, meter)?;
+
+        Ok(SplitStore::from_boxed(objects, manifests))
     }
 
     /// `true` when the resolved `--store` URL routes to a third-party
@@ -1205,6 +1402,12 @@ impl Cli {
     /// the identical errors `resolve_store` surfaces, so calling this after a
     /// successful `resolve_store` introduces no new failure mode.
     fn store_is_external(&self) -> Result<bool> {
+        // A split store (`--objects-store` set) is always in-process: both sides
+        // are built via `stream_store_for_adapter`, which rejects external URLs.
+        // So a split store never takes the external emit-command push/fetch path.
+        if self.globals.objects_store.is_some() {
+            return Ok(false);
+        }
         let store_url = self
             .globals
             .store
@@ -1455,7 +1658,51 @@ impl Cli {
     ///
     /// Output convention (consistent with `push`/`stage`): on a real sync the id
     /// is printed to STDOUT; a human summary always goes to STDERR.
-    fn run_sync(&self, from_url: &str, to_url: &str) -> Result<()> {
+    /// Builds the `StreamStore` for ONE side of a `sync`. When `objects_url` is
+    /// present, that side is a split store: objects route to `objects_url`,
+    /// manifests to `manifest_url` — wrapped in an in-process [`SplitStore`]
+    /// exactly as [`Self::resolve_split_store`] does for `--objects-store`. When
+    /// absent, the side is the plain colocated store at `manifest_url`,
+    /// byte-for-byte as before. BOTH sides of a split are built via
+    /// [`stream_store_for_adapter`], so an external `custom://` on either is
+    /// rejected — identical to non-split sync.
+    ///
+    /// `side` names the side (`--from`/`--to`) for error context only.
+    fn sync_side_store(
+        &self,
+        manifest_url: &str,
+        objects_url: Option<&str>,
+        side: &str,
+    ) -> Result<Box<dyn StreamStore + Sync>> {
+        let Some(objects_url) = objects_url else {
+            let adapter = resolve_adapter(manifest_url)
+                .with_context(|| format!("resolving {side} store protocol"))?;
+            let config = self.transfer_config_for(Some(adapter.name()))?;
+            return stream_store_for_adapter(&adapter, manifest_url, config, None);
+        };
+
+        let objects_adapter = resolve_adapter(objects_url)
+            .with_context(|| format!("resolving {side}-objects protocol"))?;
+        let objects_config = self.transfer_config_for(Some(objects_adapter.name()))?;
+        let objects =
+            stream_store_for_adapter(&objects_adapter, objects_url, objects_config, None)?;
+
+        let manifests_adapter = resolve_adapter(manifest_url)
+            .with_context(|| format!("resolving {side} store protocol"))?;
+        let manifests_config = self.transfer_config_for(Some(manifests_adapter.name()))?;
+        let manifests =
+            stream_store_for_adapter(&manifests_adapter, manifest_url, manifests_config, None)?;
+
+        Ok(Box::new(SplitStore::from_boxed(objects, manifests)))
+    }
+
+    fn run_sync(
+        &self,
+        from_url: &str,
+        to_url: &str,
+        from_objects: Option<&str>,
+        to_objects: Option<&str>,
+    ) -> Result<()> {
         let id = self.require_id()?;
         anyhow::ensure!(
             from_url != to_url,
@@ -1463,14 +1710,16 @@ impl Cli {
         );
 
         let from_adapter = resolve_adapter(from_url).context("resolving --from store protocol")?;
-        let to_adapter = resolve_adapter(to_url).context("resolving --to store protocol")?;
         // Each endpoint gets its own per-backend rate-limit defaults; the shared
         // sync pipe (concurrency, retry, byte budget accounting) is driven by the
         // source-side config below.
-        let from_config = self.transfer_config_for(Some(from_adapter.name()))?;
-        let to_config = self.transfer_config_for(Some(to_adapter.name()))?;
-        let from_store = stream_store_for_adapter(&from_adapter, from_url, from_config, None)?;
-        let to_store = stream_store_for_adapter(&to_adapter, to_url, to_config, None)?;
+        // Per-side stores: when `--from-objects`/`--to-objects` is present, THAT
+        // side is a split store (objects = the flag's pool, manifests = the
+        // `--from`/`--to` URI), built exactly like `resolve_split_store`. Absent =>
+        // a plain colocated store as before. A `SplitStore` IS a `StreamStore`, so
+        // the `sync_snapshot` engine is unchanged.
+        let from_store = self.sync_side_store(from_url, from_objects, "--from")?;
+        let to_store = self.sync_side_store(to_url, to_objects, "--to")?;
         let config = self.transfer_config_for(Some(from_adapter.name()))?;
 
         self.log_transfer_config();
@@ -1518,6 +1767,124 @@ impl Cli {
         Ok(())
     }
 
+    /// `snapdir diff --from <ref>… --to <ref>… [--all] [--json] [--exit-code]
+    /// [--on-conflict <error|last-wins>]`: compare two SIDES, each a UNION of
+    /// one-or-more manifests, and report file-level differences.
+    ///
+    /// MANIFESTS ONLY: every ref is resolved via [`Self::resolve_side`], which
+    /// calls EXCLUSIVELY [`StreamStore::list_manifest_ids`] (to enumerate a
+    /// store) and [`Store::get_manifest`] (BLAKE3-verified) — it NEVER
+    /// constructs an object store, calls `get_object`, or fetches a blob. So a
+    /// store whose `.objects/` pool is absent/garbage still diffs correctly.
+    ///
+    /// The comparison itself is the pure map-diff in [`crate::diff`]: each side
+    /// unions to a `path -> ManifestEntry` map (collisions handled per
+    /// `on_conflict`), then [`crate::diff::classify`] yields the A/D/M(/=) rows.
+    fn run_diff(
+        &self,
+        from: &[String],
+        to: &[String],
+        all: bool,
+        json: bool,
+        exit_code: bool,
+        on_conflict: crate::diff::OnConflict,
+    ) -> Result<()> {
+        use crate::diff::{classify, render_json, render_porcelain, union_side};
+
+        // Resolve each side to its set of manifests (manifests-only reads), then
+        // union into a path map. A differing-content intra-side collision under
+        // OnConflict::Error surfaces as an actionable error naming the path.
+        let from_manifests = self.resolve_side(from).context("resolving --from side")?;
+        let to_manifests = self.resolve_side(to).context("resolving --to side")?;
+
+        let from_map = union_side(&from_manifests, on_conflict).map_err(|c| {
+            anyhow::anyhow!(
+                "intra-side conflict on --from: the path {:?} has differing content across \
+                 two refs (collision); pass --on-conflict last-wins to let the last ref win",
+                c.path
+            )
+        })?;
+        let to_map = union_side(&to_manifests, on_conflict).map_err(|c| {
+            anyhow::anyhow!(
+                "intra-side conflict on --to: the path {:?} has differing content across \
+                 two refs (collision); pass --on-conflict last-wins to let the last ref win",
+                c.path
+            )
+        })?;
+
+        let rows = classify(&from_map, &to_map, all);
+
+        // A "difference" for --exit-code is any A/D/M row (never an unchanged
+        // row that only --all surfaces).
+        let has_difference = rows
+            .iter()
+            .any(|r| r.status != crate::diff::Status::Unchanged);
+
+        let out = std::io::stdout();
+        let mut out = out.lock();
+        if json {
+            writeln!(out, "{}", render_json(&rows))?;
+        } else {
+            // render_porcelain already terminates each line with `\n`.
+            write!(out, "{}", render_porcelain(&rows))?;
+        }
+        out.flush()?;
+
+        // git `diff --exit-code` semantics: exit 1 on any difference, AFTER the
+        // porcelain has been written. Without the flag, always exit 0.
+        if exit_code && has_difference {
+            drop(out);
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+
+    /// Resolves one diff SIDE (a list of refs) to its set of manifests, reading
+    /// MANIFESTS ONLY.
+    ///
+    /// For each ref: build the store via the same [`stream_store_for_adapter`]
+    /// resolver the plumbing commands use, then enumerate it with
+    /// [`StreamStore::list_manifest_ids`] and read each manifest with
+    /// [`Store::get_manifest`] (which BLAKE3-verifies the bytes hash back to the
+    /// id). When the global `--id` is set AND that id is present in this ref's
+    /// store, the side is PINNED to exactly that one manifest (otherwise the
+    /// whole store is unioned). An empty/missing manifest store contributes
+    /// nothing (its `list_manifest_ids` yields zero ids).
+    ///
+    /// NO object store is ever constructed and no blob is ever fetched — the
+    /// only store methods called are `list_manifest_ids` and `get_manifest`.
+    fn resolve_side(&self, refs: &[String]) -> Result<Vec<Manifest>> {
+        let pinned_id = self.globals.id.as_deref();
+        let mut manifests = Vec::new();
+        for store_url in refs {
+            let adapter =
+                resolve_adapter(store_url).context("resolving a --from/--to ref protocol")?;
+            let config = self.transfer_config_for(Some(adapter.name()))?;
+            // MANIFESTS-ONLY: a StreamStore exposes both list_manifest_ids and
+            // get_manifest; we never touch its object surface.
+            let store = stream_store_for_adapter(&adapter, store_url, config, None)?;
+
+            let all_ids = store
+                .list_manifest_ids()
+                .with_context(|| format!("listing manifests in {store_url}"))?;
+
+            // If --id is set and this store holds it, pin to that single
+            // manifest; else union the whole store's manifests.
+            let ids: Vec<String> = match pinned_id {
+                Some(id) if all_ids.iter().any(|x| x == id) => vec![id.to_owned()],
+                _ => all_ids,
+            };
+
+            for id in &ids {
+                let manifest = store
+                    .get_manifest(id)
+                    .with_context(|| format!("reading manifest {id} from {store_url}"))?;
+                manifests.push(manifest);
+            }
+        }
+        Ok(manifests)
+    }
+
     /// `snapdir objects-needed --store <url>` (hidden plumbing): read candidate
     /// checksums from stdin (one per line) and print the subset the store does
     /// NOT hold, one per line, preserving first-occurrence order.
@@ -1552,11 +1919,21 @@ impl Cli {
     /// only, the byte stream is the entire stdout contract.
     ///
     /// The id list gets the same fail-closed validation as `objects-needed`
-    /// (and is deduped — [`write_pack`] documents dedup as the caller's job).
-    /// Any failure, including a missing object, makes [`write_pack`] abort
-    /// BEFORE the `end` trailer, so the piped `receive-pack` fails too: no
-    /// silent partial transfer.
-    fn run_send_pack(&self, ids: &Path, manifest_id: Option<&str>) -> Result<()> {
+    /// (and is deduped — [`write_pack_with_format`] documents dedup as the
+    /// caller's job). Any failure, including a missing object, makes
+    /// [`write_pack_with_format`] abort BEFORE the `end` trailer, so the piped
+    /// `receive-pack` fails too: no silent partial transfer.
+    ///
+    /// `format` is the resolved on-wire encoding ([`PackFormat::V1`] by default
+    /// — byte-identical to the historical stream — or [`PackFormat::Zstd`] when
+    /// the hidden `--pack-format zstd` flag opts in). `receive-pack` needs no
+    /// matching flag: it sniffs the magic and accepts either form.
+    fn run_send_pack(
+        &self,
+        ids: &Path,
+        manifest_id: Option<&str>,
+        format: PackFormat,
+    ) -> Result<()> {
         // Read + validate the id list (file path or `-` = stdin) before any
         // store work; a malformed list emits not a single pack byte.
         let ids = if ids == Path::new("-") {
@@ -1577,7 +1954,7 @@ impl Cli {
         }
         let store = self.resolve_stream_store()?;
         let stdout = std::io::stdout();
-        let report = write_pack(&*store, &ids, manifest_id, stdout.lock())
+        let report = write_pack_with_format(&*store, &ids, manifest_id, format, stdout.lock())
             .context("writing pack stream to stdout")?;
         if !self.globals.quiet {
             eprintln!(
@@ -1625,8 +2002,12 @@ impl Cli {
 
         let (report, committed) = if matches!(adapter, Adapter::File) {
             // file:// — the hot ssh path: stream payloads straight to disk.
+            // `SNAPDIR_FSYNC` selects crash-durability (default `batch`); the
+            // barrier fires through `RecordingSink::flush_barrier` before the
+            // manifest commits, so a durable manifest implies durable objects.
+            let durability = fsync_durability_from_env()?;
             let store = FileStore::new_with_config(store_url, config);
-            let mut sink = FileSink::new(&store);
+            let mut sink = FileSink::new(&store).with_durability(durability);
             read_pack_recording(stdin.lock(), &mut sink)?
         } else {
             // Any other StreamStore: one buffered record at a time. External
@@ -1667,6 +2048,13 @@ impl Cli {
     /// `sync` uses (external `snapdir-*-store` URLs are rejected there — they
     /// have no in-process streaming surface).
     fn resolve_stream_store(&self) -> Result<Box<dyn StreamStore + Sync>> {
+        // When `--objects-store` is set, wrap the pool (objects) + `--store`
+        // (manifests) in an in-process `SplitStore`; both sides go through
+        // `stream_store_for_adapter`, so external URLs are rejected on either
+        // side. When absent, behavior is unchanged.
+        if self.globals.objects_store.is_some() {
+            return Ok(Box::new(self.resolve_split_store(None)?));
+        }
         let store_url = self
             .globals
             .store
@@ -1721,7 +2109,82 @@ impl Cli {
         exclude: &[String],
         meter: Option<&Meter>,
     ) -> Result<Manifest> {
-        let root = resolve_root(path).context("resolving manifest path")?;
+        let (root, options) = self.resolve_walk(
+            path,
+            absolute,
+            no_follow,
+            exclude,
+            "resolving manifest path",
+        )?;
+
+        // Select the checksum function. `b3sum` (or unset) is the default; the
+        // CLI reads `SNAPDIR_MANIFEST_CONTEXT` (core stays env-pure) to switch
+        // to keyed BLAKE3. `--checksum-bin` selects md5sum / sha256sum.
+        match checksum_bin {
+            None | Some("b3sum") => {
+                let context = std::env::var("SNAPDIR_MANIFEST_CONTEXT").unwrap_or_default();
+                if context.is_empty() {
+                    walk_with(&root, &options, &Blake3Hasher::new(), meter)
+                } else {
+                    walk_with(&root, &options, &Blake3KeyedHasher::new(context), meter)
+                }
+            }
+            Some("md5sum") => walk_with(&root, &options, &Md5Hasher::new(), meter),
+            Some("sha256sum") => walk_with(&root, &options, &Sha256Hasher::new(), meter),
+            Some(other) => {
+                anyhow::bail!("snapdir: unsupported --checksum-bin '{other}'")
+            }
+        }
+    }
+
+    /// Sibling of [`Self::build_manifest`] that ALSO returns the walk's
+    /// [`CopyGuard`] side channel — used ONLY by `run_stage` so the local-cache
+    /// [`FileStore`]'s stat-validated clone-skip can engage. The resolved
+    /// `(root, options, hasher)` are identical to [`Self::build_manifest`] (both
+    /// route through [`Self::resolve_walk`]), so the returned [`Manifest`] — and
+    /// hence the snapshot id — is byte-identical. The map keys are the walk's
+    /// absolute file paths (`root.join(rel)`), exactly what `push` looks up.
+    fn build_manifest_with_guards(
+        &self,
+        path: Option<&Path>,
+        absolute: bool,
+        no_follow: bool,
+        checksum_bin: Option<&str>,
+        exclude: &[String],
+        meter: Option<&Meter>,
+    ) -> Result<(Manifest, std::collections::HashMap<PathBuf, CopyGuard>)> {
+        let (root, options) =
+            self.resolve_walk(path, absolute, no_follow, exclude, "resolving stage path")?;
+
+        match checksum_bin {
+            None | Some("b3sum") => {
+                let context = std::env::var("SNAPDIR_MANIFEST_CONTEXT").unwrap_or_default();
+                if context.is_empty() {
+                    walk_with_guards_ctx(&root, &options, &Blake3Hasher::new(), meter)
+                } else {
+                    walk_with_guards_ctx(&root, &options, &Blake3KeyedHasher::new(context), meter)
+                }
+            }
+            Some("md5sum") => walk_with_guards_ctx(&root, &options, &Md5Hasher::new(), meter),
+            Some("sha256sum") => walk_with_guards_ctx(&root, &options, &Sha256Hasher::new(), meter),
+            Some(other) => {
+                anyhow::bail!("snapdir: unsupported --checksum-bin '{other}'")
+            }
+        }
+    }
+
+    /// Resolves the walk root and [`WalkOptions`] shared by
+    /// [`Self::build_manifest`] and [`Self::build_manifest_with_guards`] so both
+    /// derive an IDENTICAL traversal (`follow`/`path_mode`/`exclude`/`walk_jobs`).
+    fn resolve_walk(
+        &self,
+        path: Option<&Path>,
+        absolute: bool,
+        no_follow: bool,
+        exclude: &[String],
+        context: &'static str,
+    ) -> Result<(PathBuf, WalkOptions)> {
+        let root = resolve_root(path).context(context)?;
 
         // Expand the exclude patterns. Each `--exclude` value is expanded
         // independently — `%system%` / `%common%` macros must be expanded
@@ -1755,26 +2218,9 @@ impl Cli {
             follow,
             path_mode,
             exclude: matcher,
+            walk_jobs: self.globals.walk_jobs,
         };
-
-        // Select the checksum function. `b3sum` (or unset) is the default; the
-        // CLI reads `SNAPDIR_MANIFEST_CONTEXT` (core stays env-pure) to switch
-        // to keyed BLAKE3. `--checksum-bin` selects md5sum / sha256sum.
-        match checksum_bin {
-            None | Some("b3sum") => {
-                let context = std::env::var("SNAPDIR_MANIFEST_CONTEXT").unwrap_or_default();
-                if context.is_empty() {
-                    walk_with(&root, &options, &Blake3Hasher::new(), meter)
-                } else {
-                    walk_with(&root, &options, &Blake3KeyedHasher::new(context), meter)
-                }
-            }
-            Some("md5sum") => walk_with(&root, &options, &Md5Hasher::new(), meter),
-            Some("sha256sum") => walk_with(&root, &options, &Sha256Hasher::new(), meter),
-            Some(other) => {
-                anyhow::bail!("snapdir: unsupported --checksum-bin '{other}'")
-            }
-        }
+        Ok((root, options))
     }
 }
 
@@ -1903,13 +2349,36 @@ fn read_checksum_lines(reader: impl BufRead) -> Result<Vec<String>> {
 
 /// Drops duplicate checksums, keeping the FIRST occurrence of each and the
 /// relative order of survivors. The pack/diff libs document deduplication as
-/// the caller's job ([`StreamStore::objects_needed`], [`write_pack`]), so the
-/// CLI is where it happens.
+/// the caller's job ([`StreamStore::objects_needed`], [`write_pack_with_format`]),
+/// so the CLI is where it happens.
 fn dedupe_preserving_order(ids: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::with_capacity(ids.len());
     ids.into_iter()
         .filter(|id| seen.insert(id.clone()))
         .collect()
+}
+
+/// Resolves the receive-pack crash-durability mode from `SNAPDIR_FSYNC`.
+///
+/// `batch` (the default when unset/empty) enables batched durability — exactly
+/// two full syncs per pack so a durable manifest implies durable objects. `off`
+/// restores the historical no-fsync filing. Any OTHER value is a hard error
+/// (fail closed): we never silently fall back to a weaker durability than the
+/// operator asked for.
+fn fsync_durability_from_env() -> Result<Durability> {
+    match std::env::var("SNAPDIR_FSYNC") {
+        Err(std::env::VarError::NotPresent) => Ok(Durability::Batch),
+        Ok(raw) => match raw.trim() {
+            "" | "batch" => Ok(Durability::Batch),
+            "off" => Ok(Durability::Off),
+            other => anyhow::bail!(
+                "invalid SNAPDIR_FSYNC {other:?}: expected `batch` (default) or `off`"
+            ),
+        },
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "invalid SNAPDIR_FSYNC: value is not valid UTF-8; expected `batch` (default) or `off`"
+        ),
+    }
 }
 
 /// A [`PackSink`] decorator that records WHICH manifest id the stream
@@ -1950,6 +2419,14 @@ impl PackSink for RecordingSink<'_> {
         self.inner.put_manifest(id, manifest)?;
         self.manifest_id = Some(id.to_owned());
         Ok(())
+    }
+
+    fn flush_barrier(&mut self) -> Result<(), StoreError> {
+        // MUST delegate: `read_pack` fires the barrier through the sink it
+        // drives (the RecordingSink), right before the manifest. Without this
+        // override the no-op trait default would swallow it and the inner
+        // FileSink's durability would silently never activate.
+        self.inner.flush_barrier()
     }
 }
 
@@ -2086,13 +2563,27 @@ fn reformat_env_default(key: &str, value: &str) -> String {
 /// `anyhow` error with context.
 ///
 /// [`WalkError`]: snapdir_core::WalkError
-fn walk_with<H: Hasher>(
+fn walk_with<H: Hasher + HashFile + Sync>(
     root: &Path,
     options: &WalkOptions,
     hasher: &H,
     meter: Option<&Meter>,
 ) -> Result<Manifest> {
     walk_with_meter(root, options, hasher, meter)
+        .with_context(|| format!("walking {}", root.display()))
+}
+
+/// Like [`walk_with`], but ALSO returns the walk's [`CopyGuard`] side channel
+/// (keyed by each plain regular file's absolute working-tree path). Used only by
+/// the stage→local-cache push so [`FileStore`]'s stat-validated clone-skip can
+/// engage; the [`Manifest`] is byte-identical to [`walk_with`]'s.
+fn walk_with_guards_ctx<H: Hasher + HashFile + Sync>(
+    root: &Path,
+    options: &WalkOptions,
+    hasher: &H,
+    meter: Option<&Meter>,
+) -> Result<(Manifest, std::collections::HashMap<PathBuf, CopyGuard>)> {
+    walk_with_guards(root, options, hasher, meter)
         .with_context(|| format!("walking {}", root.display()))
 }
 

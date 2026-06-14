@@ -29,15 +29,18 @@
 //!
 //! All I/O is native in-process filesystem I/O; nothing shells out.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
 use snapdir_core::manifest::{Manifest, PathType};
 use snapdir_core::merkle::{Blake3Hasher, Hasher};
-use snapdir_core::store::{manifest_path, object_path, Store, StoreError};
+use snapdir_core::store::{manifest_path, object_path, Store, StoreError, MANIFESTS_DIR};
+use snapdir_core::CopyGuard;
 use snapdir_core::Meter;
 
 use crate::adaptive::{
@@ -65,6 +68,47 @@ pub struct FileStore {
     /// default from every constructor) means zero recording and byte-identical
     /// behavior. Set by the CLI via [`FileStore::with_meter`].
     meter: Option<Arc<Meter>>,
+    /// Per-source [`CopyGuard`] side channel (keyed by the user file's absolute
+    /// or join-base-relative path, exactly as the walk recorded it). Populated
+    /// by the CLI before a stage `push` via [`FileStore::with_copy_guards`]; on
+    /// the clone fast-path a source whose live `stat` still matches its recorded
+    /// guard skips the redundant post-copy re-hash (stat-validated trust).
+    ///
+    /// EMPTY (every constructor's default) ⇒ every push source is `Untrusted`
+    /// ⇒ the re-hash is never skipped on stage ⇒ byte-for-byte today's behavior.
+    copy_guards: HashMap<PathBuf, CopyGuard>,
+}
+
+/// How [`copy_file`] actually moved the bytes — the trust input to whether
+/// [`persist`] may skip its post-copy re-hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyMethod {
+    /// A genuine copy-on-write clone success via the `CoW` clone fast-path
+    /// (`clonefile` on macOS, `FICLONE` reflink on Linux): the target is
+    /// bit-identical to the source by construction (a copy-on-write clone can
+    /// never corrupt), so — under the right trust — the re-hash can be skipped.
+    Cloned,
+    /// A plain `fs::copy` byte copy (the `fs::copy` fallback, unsupported FS,
+    /// cross-filesystem, or `SNAPDIR_CLONEFILE=0`). A byte copy CAN corrupt, so
+    /// this path ALWAYS re-hashes; the skip is never taken here.
+    Copied,
+}
+
+/// Why (or whether) a clone of a given source may be trusted enough to skip the
+/// post-copy re-hash. Threaded through the copy jobs alongside the expected
+/// checksum; only ever consulted on the [`CopyMethod::Cloned`] path.
+#[derive(Debug, Clone, Copy)]
+enum CopyTrust {
+    /// The source is an immutable, read-verified content-addressed store object
+    /// (the FETCH/checkout path): a clone of it is provably bit-identical to a
+    /// blob that already verified, so the re-hash is always skipped.
+    TrustedObject,
+    /// The source is a mutable user file the walk recorded a [`CopyGuard`] for
+    /// (the STAGE/push path): re-`stat` it at clone time and skip the re-hash
+    /// IFF it still matches; otherwise re-hash (→ Integrity if it now differs).
+    StatGuarded(CopyGuard),
+    /// No trust basis (a stage source with no recorded guard): always re-hash.
+    Untrusted,
 }
 
 impl FileStore {
@@ -102,6 +146,7 @@ impl FileStore {
             root: root.into(),
             config,
             meter: None,
+            copy_guards: HashMap::new(),
         }
     }
 
@@ -114,6 +159,28 @@ impl FileStore {
     pub fn with_meter(mut self, meter: Option<Arc<Meter>>) -> Self {
         self.meter = meter;
         self
+    }
+
+    /// Attaches the per-source [`CopyGuard`] map the walk recorded, enabling the
+    /// stat-validated clone-skip on the stage `push` path. The keys are the
+    /// source file paths exactly as passed to [`push`](Store::push) joins
+    /// (i.e. `source.join(rel)`); a source present in the map and whose live
+    /// `stat` still matches skips the redundant post-copy re-hash on a clone.
+    ///
+    /// Builder form: the CLI calls this with the
+    /// [`walk_with_guards`](snapdir_core::walk_with_guards) map before staging.
+    /// The default (no call) is an empty map ⇒ every push source is
+    /// [`CopyTrust::Untrusted`] ⇒ byte-for-byte today's always-rehash behavior.
+    #[must_use]
+    pub fn with_copy_guards(mut self, copy_guards: HashMap<PathBuf, CopyGuard>) -> Self {
+        self.copy_guards = copy_guards;
+        self
+    }
+
+    /// Replaces the [`CopyGuard`] map in place (setter companion to the
+    /// [`with_copy_guards`](Self::with_copy_guards) builder).
+    pub fn set_copy_guards(&mut self, copy_guards: HashMap<PathBuf, CopyGuard>) {
+        self.copy_guards = copy_guards;
     }
 
     /// Returns the store's root directory.
@@ -148,7 +215,10 @@ impl FileStore {
     /// work (`try_for_each`). A `concurrency` of 1 yields a single-threaded
     /// sequential copy. Each task uses a fresh, cheap, stateless
     /// [`Blake3Hasher`] to sidestep any `Sync` concern.
-    fn parallel_copy(&self, jobs: &[(PathBuf, PathBuf, String)]) -> Result<(), StoreError> {
+    fn parallel_copy(
+        &self,
+        jobs: &[(PathBuf, PathBuf, String, CopyTrust)],
+    ) -> Result<(), StoreError> {
         if jobs.is_empty() {
             return Ok(());
         }
@@ -162,7 +232,10 @@ impl FileStore {
 
     /// Fixed-concurrency rayon copy: pool sized to `config.concurrency`, no gate
     /// or driver. The historical (byte-identical) local-copy path.
-    fn parallel_copy_fixed(&self, jobs: &[(PathBuf, PathBuf, String)]) -> Result<(), StoreError> {
+    fn parallel_copy_fixed(
+        &self,
+        jobs: &[(PathBuf, PathBuf, String, CopyTrust)],
+    ) -> Result<(), StoreError> {
         use rayon::prelude::*;
 
         // `&Meter` is `Sync`, so it is shared across the rayon closures. `None`
@@ -178,22 +251,24 @@ impl FileStore {
             })?;
 
         pool.install(|| {
-            jobs.par_iter().try_for_each(|(source, target, expected)| {
-                if let Some(m) = meter {
-                    m.object_started();
-                }
-                // `persist` reads `source` and writes `target`. Record the
-                // source size as both bytes-in (read) and bytes-out (written);
-                // a missing source surfaces as the persist error below.
-                let len = std::fs::metadata(source).map_or(0, |md| md.len());
-                persist(source, target, expected, &Blake3Hasher::new())?;
-                if let Some(m) = meter {
-                    m.add_in(len);
-                    m.add_out(len);
-                    m.object_finished();
-                }
-                Ok(())
-            })
+            jobs.par_iter()
+                .try_for_each(|(source, target, expected, trust)| {
+                    if let Some(m) = meter {
+                        m.object_started();
+                    }
+                    // `persist` reads `source` and writes `target`. Record the
+                    // source size as both bytes-in (read) and bytes-out
+                    // (written); a missing source surfaces as the persist error
+                    // below.
+                    let len = std::fs::metadata(source).map_or(0, |md| md.len());
+                    persist(source, target, expected, *trust, &Blake3Hasher::new())?;
+                    if let Some(m) = meter {
+                        m.add_in(len);
+                        m.add_out(len);
+                        m.object_finished();
+                    }
+                    Ok(())
+                })
         })
     }
 
@@ -208,7 +283,7 @@ impl FileStore {
     /// differs.
     fn parallel_copy_adaptive(
         &self,
-        jobs: &[(PathBuf, PathBuf, String)],
+        jobs: &[(PathBuf, PathBuf, String, CopyTrust)],
         fraction: f64,
         ceiling: usize,
     ) -> Result<(), StoreError> {
@@ -218,7 +293,7 @@ impl FileStore {
 
         let sizes: Vec<u64> = jobs
             .iter()
-            .map(|(source, _, _)| std::fs::metadata(source).map_or(0, |md| md.len()))
+            .map(|(source, _, _, _)| std::fs::metadata(source).map_or(0, |md| md.len()))
             .collect();
         let p95 = p95_object_size(&sizes);
         let total_ram = snapdir_core::resources::total_ram_bytes().unwrap_or(0);
@@ -251,33 +326,34 @@ impl FileStore {
             })?;
 
         let result = pool.install(|| {
-            jobs.par_iter().try_for_each(|(source, target, expected)| {
-                // Gate to the controller's live limit (effective concurrency).
-                let _permit = gate.acquire_blocking();
-                if let Some(m) = meter {
-                    m.object_started();
-                }
-                let len = std::fs::metadata(source).map_or(0, |md| md.len());
-                let started = std::time::Instant::now();
-                let outcome = persist(source, target, expected, &Blake3Hasher::new());
-                let latency = started.elapsed();
-                let (bytes, op_result) = match &outcome {
-                    Ok(()) => (len, OpResult::Ok),
-                    Err(err) => (0, classify_error(err)),
-                };
-                driver.record_op(OpSample {
-                    bytes,
-                    latency,
-                    result: op_result,
-                });
-                outcome?;
-                if let Some(m) = meter {
-                    m.add_in(len);
-                    m.add_out(len);
-                    m.object_finished();
-                }
-                Ok(())
-            })
+            jobs.par_iter()
+                .try_for_each(|(source, target, expected, trust)| {
+                    // Gate to the controller's live limit (effective concurrency).
+                    let _permit = gate.acquire_blocking();
+                    if let Some(m) = meter {
+                        m.object_started();
+                    }
+                    let len = std::fs::metadata(source).map_or(0, |md| md.len());
+                    let started = std::time::Instant::now();
+                    let outcome = persist(source, target, expected, *trust, &Blake3Hasher::new());
+                    let latency = started.elapsed();
+                    let (bytes, op_result) = match &outcome {
+                        Ok(()) => (len, OpResult::Ok),
+                        Err(err) => (0, classify_error(err)),
+                    };
+                    driver.record_op(OpSample {
+                        bytes,
+                        latency,
+                        result: op_result,
+                    });
+                    outcome?;
+                    if let Some(m) = meter {
+                        m.add_in(len);
+                        m.add_out(len);
+                        m.object_finished();
+                    }
+                    Ok(())
+                })
         });
 
         // Stop the tick thread and join it before returning.
@@ -333,7 +409,7 @@ impl Store for FileStore {
         // the `ObjectNotFound` error when a needed source is missing). The file
         // entries that actually need copying are collected as `(source, target,
         // checksum)` jobs for the parallel phase.
-        let mut jobs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+        let mut jobs: Vec<(PathBuf, PathBuf, String, CopyTrust)> = Vec::new();
         for entry in manifest.entries() {
             let rel = strip_leading_dot_slash(&entry.path);
             let target = dest.join(rel);
@@ -362,7 +438,15 @@ impl Store for FileStore {
                             checksum: entry.checksum.clone(),
                         });
                     }
-                    jobs.push((source, target, entry.checksum.clone()));
+                    // FETCH: the source is an immutable, content-addressed store
+                    // object → a clone of it is provably bit-identical → always
+                    // skip the re-hash (read-time `get_object` is the backstop).
+                    jobs.push((
+                        source,
+                        target,
+                        entry.checksum.clone(),
+                        CopyTrust::TrustedObject,
+                    ));
                 }
             }
         }
@@ -372,7 +456,7 @@ impl Store for FileStore {
         if let Some(m) = self.meter.as_deref() {
             let total: u64 = jobs
                 .iter()
-                .map(|(source, _, _)| fs::metadata(source).map_or(0, |md| md.len()))
+                .map(|(source, _, _, _)| fs::metadata(source).map_or(0, |md| md.len()))
                 .sum();
             m.set_total(total);
         }
@@ -400,7 +484,7 @@ impl Store for FileStore {
         // Collect every referenced object that is absent (skip-if-present per
         // object: an object already filed under its content address is trusted,
         // it is content-addressable). These are copied BEFORE the manifest.
-        let mut jobs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+        let mut jobs: Vec<(PathBuf, PathBuf, String, CopyTrust)> = Vec::new();
         for entry in manifest.entries() {
             if entry.path_type != PathType::File {
                 continue;
@@ -415,7 +499,16 @@ impl Store for FileStore {
             }
             let rel = strip_leading_dot_slash(&entry.path);
             let object_source = source.join(rel);
-            jobs.push((object_source, object_target, entry.checksum.clone()));
+            // STAGE: a recorded `CopyGuard` for this source enables the
+            // stat-validated clone-skip (`persist` re-stats + compares); no
+            // guard ⇒ `Untrusted` ⇒ always re-hash (today's behavior). An empty
+            // `copy_guards` map therefore reproduces today's behavior exactly.
+            let trust = self
+                .copy_guards
+                .get(&object_source)
+                .copied()
+                .map_or(CopyTrust::Untrusted, CopyTrust::StatGuarded);
+            jobs.push((object_source, object_target, entry.checksum.clone(), trust));
         }
 
         // Total to push (bytes over the to-push set), recorded so the bar can
@@ -423,7 +516,7 @@ impl Store for FileStore {
         if let Some(m) = self.meter.as_deref() {
             let total: u64 = jobs
                 .iter()
-                .map(|(src, _, _)| fs::metadata(src).map_or(0, |md| md.len()))
+                .map(|(src, _, _, _)| fs::metadata(src).map_or(0, |md| md.len()))
                 .sum();
             m.set_total(total);
         }
@@ -504,6 +597,66 @@ impl StreamStore for FileStore {
             &Blake3Hasher::new(),
         )
     }
+
+    fn list_manifest_ids(&self) -> Result<Vec<String>, StoreError> {
+        let manifests_root = self.root.join(MANIFESTS_DIR);
+
+        // Empty prefix: no `.manifests/` tree yet => Ok(empty), never an error.
+        let walk = match fs::read_dir(&manifests_root) {
+            Ok(walk) => walk,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(StoreError::Io(err)),
+        };
+
+        // Walk the shard tree, collecting each file's path components RELATIVE
+        // to `.manifests/` (the inverse of `manifest_path`'s `3/3/3/rest`
+        // split). Dedup via the set; a stray / malformed key reconstructs to a
+        // non-id and is skipped without erroring.
+        let mut ids = std::collections::HashSet::new();
+        let mut stack: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        for entry in walk {
+            let entry = entry?;
+            push_manifest_walk_entry(&entry, &Vec::new(), &mut ids, &mut stack)?;
+        }
+        while let Some((dir, segments)) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                push_manifest_walk_entry(&entry, &segments, &mut ids, &mut stack)?;
+            }
+        }
+
+        Ok(ids.into_iter().collect())
+    }
+}
+
+/// Classifies one `.manifests/` walk entry: a directory is pushed onto `stack`
+/// to be descended later (carrying its accumulated shard segments); a file's
+/// full segment path is fed to
+/// [`manifest_id_from_shard_segments`](crate::stream::manifest_id_from_shard_segments)
+/// and, if it reconstructs a valid 64-hex id, inserted into `ids` (the set
+/// dedups). A non-id key is skipped without error.
+fn push_manifest_walk_entry(
+    entry: &fs::DirEntry,
+    parent_segments: &[String],
+    ids: &mut std::collections::HashSet<String>,
+    stack: &mut Vec<(PathBuf, Vec<String>)>,
+) -> Result<(), StoreError> {
+    // A non-UTF-8 component can never be part of a hex id; skip it.
+    let Ok(name) = entry.file_name().into_string() else {
+        return Ok(());
+    };
+    let mut segments = parent_segments.to_vec();
+    segments.push(name);
+
+    if entry.file_type()?.is_dir() {
+        stack.push((entry.path(), segments));
+    } else {
+        let refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+        if let Some(id) = crate::stream::manifest_id_from_shard_segments(&refs) {
+            ids.insert(id);
+        }
+    }
+    Ok(())
 }
 
 /// Copies `source` to `target`, verifying the content BLAKE3 against
@@ -513,6 +666,7 @@ fn persist(
     source: &Path,
     target: &Path,
     expected: &str,
+    trust: CopyTrust,
     hasher: &impl Hasher,
 ) -> Result<(), StoreError> {
     if let Some(parent) = target.parent() {
@@ -524,7 +678,53 @@ fn persist(
         // Copy to a unique temp path beside the target so the final rename is
         // an atomic, same-filesystem move (the oracle's `.tmp` discipline).
         let tmp = temp_sibling(target);
-        copy_file(source, &tmp)?;
+        let method = copy_file(source, &tmp)?;
+
+        // CLONE-SKIP: a genuine CoW clone is bit-identical to its source by
+        // construction, so the cloned temp need never be re-hashed — the only
+        // question is whether the SOURCE is trustworthy. On the clone path
+        // (unless the strict `SNAPDIR_VERIFY_COPIES=1` override forces a temp
+        // re-hash) we substitute a single SOURCE check for the redundant temp
+        // re-hash, decided by `CopyTrust`:
+        //
+        //   * `StatGuarded` — the walk already hashed this user file; a fresh
+        //     `stat` that still matches the recorded guard proves it is
+        //     unchanged, so the clone is trusted with NO read at all (the real
+        //     win: the walk's hash is the only read). A changed source falls
+        //     through to the temp re-hash → Integrity on a true content change.
+        //   * `TrustedObject` — a fetch source is an immutable content-addressed
+        //     store blob; we still verify the SOURCE's bytes hash to `expected`
+        //     (catching an out-of-band on-disk corruption) but, since the clone
+        //     equals the source, skip the SECOND (temp) re-hash. This preserves
+        //     the store's verify-on-fetch discipline while dropping the
+        //     redundant re-read of the cloned bytes.
+        //   * `Untrusted` — never skips (falls through to the temp re-hash).
+        //
+        // The `fs::copy` (Copied) path NEVER skips: a byte copy can corrupt, so
+        // it always re-hashes the temp (today's behavior + retry loop, below).
+        if method == CopyMethod::Cloned && !verify_copies_forced() {
+            match clone_skip_decision(source, expected, trust, hasher) {
+                CloneSkip::Skip => {
+                    // Source trusted + clone is bit-identical → rename straight
+                    // into place; the temp re-hash (and its retry loop) is
+                    // unnecessary because a CoW clone cannot corrupt.
+                    fs::rename(&tmp, target)?;
+                    return Ok(());
+                }
+                CloneSkip::SourceCorrupt { actual } => {
+                    // A `TrustedObject` whose on-disk source bytes no longer hash
+                    // to `expected`: the source itself is bad, so retrying cannot
+                    // help (mirrors the source-verify branch below).
+                    let _ = fs::remove_file(&tmp);
+                    return Err(StoreError::Integrity {
+                        address: source.display().to_string(),
+                        expected: expected.to_owned(),
+                        actual,
+                    });
+                }
+                CloneSkip::Rehash => { /* fall through to the temp re-hash */ }
+            }
+        }
 
         let actual = hash_file(&tmp, hasher)?;
         if actual == expected {
@@ -593,12 +793,313 @@ fn write_manifest(
     Ok(())
 }
 
+/// Durable variant of [`write_manifest`] for the batched receive-pack path:
+/// identical verify + atomic-rename discipline, but the temp file's data is
+/// fsynced **before** the rename and the manifest's parent shard directory is
+/// fsynced **after** it, so the manifest's directory entry survives power loss.
+///
+/// This is "full sync #2" of the receive-pack two-sync budget (the matching
+/// object barrier in [`crate::fsync::barrier_objects`] is #1); the caller must
+/// have already barriered the objects this manifest references, so a durable
+/// manifest provably implies durable objects (see the non-journaling-fs caveat
+/// in [`crate::fsync`]).
+///
+/// Used only on the receive-pack path via
+/// [`FileSink`](crate::pack::FileSink); `FileStore::push`/`put_manifest` keep
+/// the historical (non-fsync) [`write_manifest`].
+pub(crate) fn write_manifest_durable(
+    manifest: &Manifest,
+    target: &Path,
+    id: &str,
+    hasher: &impl Hasher,
+) -> Result<(), StoreError> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Same verify-before-write discipline as `write_manifest`.
+    let actual = snapdir_core::merkle::snapshot_id(manifest, hasher);
+    if actual != id {
+        return Err(StoreError::Integrity {
+            address: target.display().to_string(),
+            expected: id.to_owned(),
+            actual,
+        });
+    }
+
+    let mut text = manifest.to_string();
+    text.push('\n');
+
+    let tmp = temp_sibling(target);
+    {
+        // Write + fsync the temp file's data, THEN rename. fsyncing before the
+        // rename guarantees the bytes are stable before the directory entry
+        // that publishes them.
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        crate::fsync::sync_file_data(&file)?;
+    }
+    fs::rename(&tmp, target)?;
+
+    // fsync the parent shard directory so the rename (the new directory entry)
+    // is itself durable — this is the single ordering barrier for the manifest.
+    if let Some(parent) = target.parent() {
+        crate::fsync::sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// Process-global count of times the `CoW` clone fast-path (`clonefile` on
+/// macOS, `FICLONE` reflink on Linux) actually fired (a real clone success).
+/// Used by integration tests to assert the fast-path is exercised (not silently
+/// always falling back).
+static CLONEFILE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Returns the number of times the `CoW` clone fast-path (`clonefile` on macOS,
+/// `FICLONE` reflink on Linux) has fired in this process (incremented on each
+/// genuine clone success in [`copy_file`]). On a non-reflink filesystem, across
+/// filesystems, or with the fast-path disabled (`SNAPDIR_CLONEFILE=0`) this
+/// stays at its prior value.
+///
+/// Re-exported at the crate root as
+/// [`snapdir_stores::clonefile_hits`](crate::clonefile_hits) so integration
+/// tests can observe the fast-path firing.
+pub fn clonefile_hits() -> u64 {
+    CLONEFILE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Returns `true` unless `SNAPDIR_CLONEFILE=0` force-disables the `CoW` clone
+/// fast-path (`clonefile` on macOS, `FICLONE` reflink on Linux). Read **per copy
+/// call** (never cached) so a test can toggle the knob at runtime under its
+/// `ENV_LOCK` and have the very next copy observe it.
+fn clonefile_enabled() -> bool {
+    !matches!(std::env::var("SNAPDIR_CLONEFILE").as_deref(), Ok("0"))
+}
+
+/// Returns `true` when `SNAPDIR_VERIFY_COPIES=1` forces the write-time re-hash
+/// even on the clone fast-path (strict mode). Read **per copy call** (never
+/// cached), mirroring [`clonefile_enabled`], so a test can toggle it at runtime
+/// under its `ENV_LOCK` and have the very next copy observe it. When set, a
+/// clone still FIRES (the fast-path is not disabled) but `persist` re-hashes the
+/// cloned temp exactly as the `fs::copy` path does.
+fn verify_copies_forced() -> bool {
+    matches!(std::env::var("SNAPDIR_VERIFY_COPIES").as_deref(), Ok("1"))
+}
+
+/// The outcome of [`clone_skip_decision`]: whether a successful clone may skip
+/// the post-copy temp re-hash, must fall back to it, or has already proven the
+/// source corrupt.
+enum CloneSkip {
+    /// Trust the clone: rename straight into place, no temp re-hash.
+    Skip,
+    /// Fall through to the historical temp re-hash + retry loop.
+    Rehash,
+    /// A `TrustedObject` source's own bytes no longer hash to `expected` (an
+    /// out-of-band on-disk corruption); carries the source's actual hash for the
+    /// [`StoreError::Integrity`] the caller raises.
+    SourceCorrupt { actual: String },
+}
+
+/// Decides whether a successful clone of `source` may skip the redundant
+/// post-copy temp re-hash, given its [`CopyTrust`]. Only ever called on the
+/// [`CopyMethod::Cloned`] path with `SNAPDIR_VERIFY_COPIES` not forcing.
+///
+///   * [`CopyTrust::TrustedObject`] — verify the SOURCE's bytes hash to
+///     `expected` (one read, preserving the store's verify-on-fetch corruption
+///     discipline); on a match → [`CloneSkip::Skip`] (the bit-identical clone
+///     needs no second re-hash), on a mismatch → [`CloneSkip::SourceCorrupt`].
+///     A `stat`/read error falls back to [`CloneSkip::Rehash`].
+///   * [`CopyTrust::StatGuarded`] — re-`stat` the source and, IFF the fresh
+///     [`CopyGuard`] still equals the recorded one, [`CloneSkip::Skip`] with NO
+///     read (the walk already hashed it); any change / `stat` failure →
+///     [`CloneSkip::Rehash`] (which surfaces a true content change as
+///     [`StoreError::Integrity`]).
+///   * [`CopyTrust::Untrusted`] — [`CloneSkip::Rehash`] (never skips).
+fn clone_skip_decision(
+    source: &Path,
+    expected: &str,
+    trust: CopyTrust,
+    hasher: &impl Hasher,
+) -> CloneSkip {
+    match trust {
+        CopyTrust::Untrusted => CloneSkip::Rehash,
+        CopyTrust::StatGuarded(recorded) => match fs::metadata(source) {
+            Ok(meta) if CopyGuard::from_metadata(&meta) == Some(recorded) => CloneSkip::Skip,
+            _ => CloneSkip::Rehash,
+        },
+        CopyTrust::TrustedObject => {
+            // Verify the immutable store source once (catches on-disk
+            // corruption), but skip the redundant re-hash of the bit-identical
+            // clone. A read error (e.g. source vanished) falls back to the temp
+            // re-hash path, which will surface the same failure.
+            match hash_file(source, hasher) {
+                Ok(actual) if actual == expected => CloneSkip::Skip,
+                Ok(actual) => CloneSkip::SourceCorrupt { actual },
+                Err(_) => CloneSkip::Rehash,
+            }
+        }
+    }
+}
+
 /// Copies a regular file's bytes from `source` to `target` (mirrors the
 /// oracle's `cp -RL -n`: dereference, do not clobber — `target` is a fresh
 /// temp path so the no-clobber aspect is implicit).
-fn copy_file(source: &Path, target: &Path) -> Result<(), StoreError> {
+///
+/// When the clone knob is enabled (`SNAPDIR_CLONEFILE != "0"`), it first
+/// attempts a copy-on-write clone via the platform `CoW` primitive (`clonefile(2)`
+/// on macOS, the `FICLONE` ioctl reflink on Linux). On the not-supported /
+/// cross-filesystem / already-exists errnos it transparently falls back to
+/// [`fs::copy`]; on a genuine I/O error it propagates. The clone result is
+/// normalized to be **observably identical** to `fs::copy` (perms-only metadata;
+/// BSD flags cleared on macOS — Linux inode flags are not cloned, so no
+/// clearing is needed). On other platforms, or with the knob disabled, this is
+/// exactly the historical `fs::copy` path.
+fn copy_file(source: &Path, target: &Path) -> Result<CopyMethod, StoreError> {
+    #[cfg(target_os = "macos")]
+    {
+        if clonefile_enabled() && try_clonefile(source, target)? {
+            return Ok(CopyMethod::Cloned);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if clonefile_enabled() && try_reflink(source, target)? {
+            return Ok(CopyMethod::Cloned);
+        }
+    }
     fs::copy(source, target)?;
-    Ok(())
+    Ok(CopyMethod::Copied)
+}
+
+/// Attempts a Linux `FICLONE` (reflink) copy-on-write clone of `source` →
+/// `target` (the analogue of macOS [`try_clonefile`]).
+///
+/// Returns `Ok(true)` on a successful reflink (counter bumped + perms
+/// normalized to `fs::copy` parity); `Ok(false)` when `FICLONE` reports a
+/// not-supported / cross-filesystem / bad-arg condition and the caller should
+/// fall back to [`fs::copy`]; `Err` only on a genuine I/O failure
+/// (ENOSPC/EDQUOT/EIO/EPERM/…).
+///
+/// `target` is a freshly minted temp sibling and must NOT already exist
+/// (`create_new`), so a collision is a genuine error rather than a fallback.
+/// `FICLONE` clones DATA ONLY — inode flags (e.g. `FS_IMMUTABLE_FL`) are NOT
+/// propagated, so there is no un-GC-able-object risk and no flag-clearing is
+/// needed (unlike the macOS `chflags` normalization).
+#[cfg(target_os = "linux")]
+fn try_reflink(source: &Path, target: &Path) -> Result<bool, StoreError> {
+    use std::os::unix::io::AsRawFd;
+    use std::sync::atomic::Ordering;
+
+    // O_RDONLY source; brand-new (create_new) destination — a fresh temp
+    // sibling that must not exist.
+    let src = fs::File::open(source)?;
+    let dst = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+
+    // Keep `src` + `dst` alive across the ioctl (do NOT into_raw_fd).
+    let ret = unsafe { libc::ioctl(dst.as_raw_fd(), libc::FICLONE as _, src.as_raw_fd()) };
+    if ret != 0 {
+        let err = io::Error::last_os_error();
+        // Either branch abandons the (empty) destination, so clean it up once
+        // before deciding fall-back vs. propagate.
+        drop(dst);
+        let _ = fs::remove_file(target);
+        // Not supported by the FS / cross-filesystem / bad-arg: fall back to a
+        // plain byte copy. Anything else (ENOSPC/EDQUOT/EIO/EPERM/…) is a
+        // genuine I/O error and propagates.
+        if matches!(
+            err.raw_os_error(),
+            Some(
+                libc::EOPNOTSUPP
+                    | libc::ENOTTY
+                    | libc::EXDEV
+                    | libc::EINVAL
+                    | libc::ENOSYS
+                    | libc::EBADF
+            )
+        ) {
+            return Ok(false);
+        }
+        return Err(StoreError::Io(err));
+    }
+
+    // FICLONE clones DATA only, so match `fs::copy`'s perms-only semantics by
+    // copying the source's permission bits onto the target. No flag-clearing is
+    // needed (Linux inode flags are not cloned).
+    let src_perms = fs::metadata(source)?.permissions();
+    fs::set_permissions(target, src_perms)?;
+
+    CLONEFILE_HITS.fetch_add(1, Ordering::Relaxed);
+    Ok(true)
+}
+
+/// Attempts a macOS `clonefile(2)` copy-on-write clone of `source` → `target`.
+///
+/// Returns `Ok(true)` on a successful clone (counter bumped + clone normalized
+/// to `fs::copy` parity); `Ok(false)` when `clonefile` reports a not-supported /
+/// cross-volume / already-exists condition and the caller should fall back to
+/// [`fs::copy`]; `Err` only on a genuine I/O failure.
+#[cfg(target_os = "macos")]
+fn try_clonefile(source: &Path, target: &Path) -> Result<bool, StoreError> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::Ordering;
+
+    let src_c = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|e| StoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+    let dst_c = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|e| StoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+
+    // `clonefile` with flags=0: copy-on-write clone of a regular file. It also
+    // copies ALL metadata (mode, xattrs, BSD flags), which we normalize below.
+    let ret = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
+    if ret != 0 {
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            // Not supported by the FS / cross-volume / bad-arg / dst exists:
+            // fall back to a plain byte copy.
+            Some(
+                libc::ENOTSUP
+                | libc::EXDEV
+                | libc::ENOSYS
+                | libc::EINVAL
+                | libc::EOPNOTSUPP
+                | libc::EEXIST,
+            ) => return Ok(false),
+            // A genuine I/O error (permissions, ENOSPC, …): propagate.
+            _ => return Err(StoreError::Io(err)),
+        }
+    }
+
+    // --- Parity normalization: make the clone observably identical to fs::copy.
+    // `fs::copy` sets the destination's permission bits to the source's and
+    // copies no other metadata. `clonefile` copied EVERYTHING, so we (1) clear
+    // BSD flags so an immutable (uchg/UF_IMMUTABLE) source cannot yield an
+    // immutable, un-GC-able object and (2) re-set the perms to exactly the
+    // source's mode bits. chflags(…, 0) does not break the CoW sharing.
+    //
+    // Order matters: clear the flags FIRST. If the source was uchg, the clone
+    // is immutable too, and `set_permissions` (chmod) on an immutable file
+    // returns EPERM — so flags must come down before we touch the perms.
+    let cleared = unsafe { libc::chflags(dst_c.as_ptr(), 0) };
+    if cleared != 0 {
+        let err = io::Error::last_os_error();
+        // EOPNOTSUPP/ENOTSUP: the FS has no BSD flags, so there is nothing to
+        // clear and the object is inherently removable — tolerate. Any other
+        // failure means we may have left flags on a would-be object, so fail
+        // loudly rather than ship an un-GC-able object.
+        match err.raw_os_error() {
+            Some(libc::EOPNOTSUPP | libc::ENOTSUP) => {}
+            _ => return Err(StoreError::Io(err)),
+        }
+    }
+
+    let src_perms = fs::metadata(source)?.permissions();
+    fs::set_permissions(target, src_perms)?;
+
+    CLONEFILE_HITS.fetch_add(1, Ordering::Relaxed);
+    Ok(true)
 }
 
 /// Builds a unique temp sibling path for `target` (same directory, so the

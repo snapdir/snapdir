@@ -41,6 +41,13 @@
 //!   stream through incremental BLAKE3 verification (O(1) memory into a
 //!   [`FileSink`]), the manifest rides last and commits only after the `end`
 //!   trailer, so truncation can never publish a snapshot.
+//! - [`fsync`] ([`barrier_objects`](fsync::barrier_objects),
+//!   [`writeout_hint`](fsync::writeout_hint)) — the batched crash-durability
+//!   primitives behind the receive-pack path: a cheap per-object writeout hint
+//!   while filing, then exactly two full syncs per pack (one object barrier
+//!   before the manifest, one durable manifest commit), so a present manifest
+//!   implies present, on-disk objects even across power loss. cfg-gated over
+//!   `libc` (no new lock crate); env-free.
 //! - [`sync`] ([`sync_snapshot`], [`SyncReport`]) — streaming store-to-store
 //!   snapshot copy: walks a source manifest and copies its raw objects
 //!   source → dest through memory only (no local filesystem staging),
@@ -52,6 +59,7 @@ pub mod adaptive;
 pub mod b2_store;
 pub(crate) mod fetch;
 pub mod file_store;
+pub mod fsync;
 pub mod gcs_store;
 pub mod limits;
 pub mod pack;
@@ -60,6 +68,7 @@ pub mod retry;
 pub mod router;
 pub mod s3_store;
 pub mod shim;
+pub mod split;
 pub mod stream;
 pub mod sync;
 pub mod transfer;
@@ -70,12 +79,14 @@ pub use adaptive::{
     OpResult, OpSample,
 };
 pub use b2_store::B2Store;
-pub use file_store::FileStore;
+pub use file_store::{clonefile_hits, FileStore};
 pub use gcs_store::{GcsLocation, GcsStore};
 pub use limits::{for_scheme, BackendLimits};
 pub use pack::{
-    is_hex64, read_pack, write_pack, FileSink, PackReadReport, PackSink, PackWriteReport,
-    StreamSink, MAX_HEADER_BYTES, MAX_MANIFEST_BYTES, WIRE_CAPS, WIRE_MAGIC, WIRE_VERSION,
+    is_hex64, read_pack, write_pack, write_pack_with_format, Durability, FileSink, PackFormat,
+    PackReadReport, PackSink, PackWriteReport, StreamSink, DEFAULT_ZSTD_LEVEL, MAX_HEADER_BYTES,
+    MAX_MANIFEST_BYTES, MAX_ZSTD_LEVEL, MIN_ZSTD_LEVEL, WIRE_CAPS, WIRE_MAGIC, WIRE_MAGIC_ZSTD,
+    WIRE_VERSION,
 };
 pub use retry::{
     parse_retry_after, retry_async, retry_blocking, retry_network, AsyncSleeper, Attempt,
@@ -84,6 +95,7 @@ pub use retry::{
 pub use router::{resolve_adapter, Adapter, RouteError};
 pub use s3_store::{S3Location, S3Store};
 pub use shim::ExternalStore;
+pub use split::SplitStore;
 pub use stream::StreamStore;
 pub use sync::{sync_snapshot, SyncReport};
 pub use transfer::{
