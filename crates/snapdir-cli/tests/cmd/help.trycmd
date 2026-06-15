@@ -20,6 +20,7 @@ Commands:
   revisions     List snapshot IDs created on a location (store or absolute path)
   defaults      Print default settings and arguments
   sync          Copy a snapshot (its manifest + objects) directly between two stores, streaming through memory — no local staging
+  diff          Compare two sides, each a set of manifests, reporting file-level differences — reading MANIFESTS ONLY
   version       Print the version
   help          Print this message or the help of the given subcommand(s)
 
@@ -38,6 +39,11 @@ Options:
           Store URI: `protocol://location/path`
           
           [env: SNAPDIR_STORE=]
+
+      --objects-store <URI>
+          Shared object-pool store URI: when set, content OBJECTS route to this pool's `.objects/` while MANIFESTS route to `--store`'s `.manifests/`
+          
+          [env: SNAPDIR_OBJECTS_STORE=]
 
       --id <ID>
           Snapshot ID to operate on
@@ -89,6 +95,11 @@ Options:
           Max concurrent object transfers (0/auto = number of CPUs, capped)
           
           [env: SNAPDIR_JOBS=]
+
+      --walk-jobs <N>
+          Max parallel file-hashing jobs during the directory walk (0/auto = number of CPUs, capped). Distinct from --jobs (transfer concurrency)
+          
+          [env: SNAPDIR_WALK_JOBS=]
 
       --limit-rate <RATE>
           Limit total transfer bandwidth, e.g. 10M, 512K, 1G (wget-style; aggregate across all transfers)

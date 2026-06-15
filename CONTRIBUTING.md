@@ -26,7 +26,7 @@ and beta.
 | `crates/snapdir`         | The `snapdir` binary — a thin shim over `snapdir-cli`      |
 | `crates/snapdir-ssh-store` | `ssh://` + `sftp://` external-store binaries (system OpenSSH) |
 | `benches/`               | Criterion micro-benchmarks (`snapdir-benches`)             |
-| `tests/`                 | Integration + interop tests                                |
+| `tests/`                 | Integration + interop harnesses                            |
 
 ## Before you open a PR
 
@@ -40,7 +40,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 `cargo fmt --all` applies formatting in place. All three must be clean.
 
-## Local CI check (pre-push hook)
+## Local CI gate (pre-push hook)
 
 `ci.yaml` runs on every push and burns paid GitHub Actions minutes — including
 on red commits. To catch failures *before* they reach CI, `utils/ci/pre-push.sh`
@@ -92,18 +92,22 @@ the script print the exact install command instead.
 
 ## The byte-format contract
 
-The port is **complete**: the legacy Bash implementation was removed, and the
-manifest byte-format contract is now guarded entirely in Rust by
-**`crates/snapdir-core/tests/compat_golden.rs`** — Rust golden-constant tests
-that assert the exact bytes of manifest lines, directory merkle checksums, and
-snapshot IDs against pinned golden values. Any accidental change to the line
-format, ordering, checksum algorithm, sharded layout, or exclude sets fails the
-golden tests.
+The port is **complete**: the legacy Bash implementation was removed in
+Phase 11, and the manifest byte-format contract is now guarded entirely in Rust.
+Two mechanisms keep the on-disk format frozen:
+
+- **`crates/snapdir-core/tests/compat_golden.rs`** — Rust golden-constant tests
+  that assert the exact bytes of manifest lines, directory merkle checksums, and
+  snapshot IDs against pinned golden values.
+- **`manifest-format.sha.lock`** — a tripwire over the format-defining source so
+  any accidental change to the line format, ordering, checksum algorithm,
+  sharded layout, or exclude sets trips CI and demands an explicit, reviewed
+  bump.
 
 Changing the manifest line format, ordering, the checksum algorithm, sharding,
 or the exclude sets is a breaking change to the storage format: it requires
-maintainer approval and a deliberate update to the golden tests.
-See [`docs/rust-port/manifest-spec.md`](docs/rust-port/manifest-spec.md)
+maintainer approval and a deliberate update to the golden tests and the
+SHA-lock. See [`docs/rust-port/manifest-spec.md`](docs/rust-port/manifest-spec.md)
 for the frozen format and the architecture decision records in
 [`docs/adr/`](docs/adr/) for the rationale.
 
@@ -111,7 +115,7 @@ for the frozen format and the architecture decision records in
 
 The shipped binary does everything in-process. Never shell out to `b3sum`,
 `sqlite3`, `aws`, `b2`, or `gcloud` from `crates/` — external binaries are
-allowed only in the test suite.
+allowed only in the test/oracle harness.
 
 ## Commits and PRs
 

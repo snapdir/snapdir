@@ -23,6 +23,15 @@ integration-mock = []
 snapdir-core.workspace = true
 thiserror.workspace = true
 
+# --- Receiver durability (fsync.rs) -----------------------------------------
+# `libc` exposes the raw `sync_file_range`/`fsync` syscalls behind the batched
+# receive-pack durability barrier (cfg-gated per platform). This is NOT a new
+# supply-chain edge: `libc` is already a DIRECT dependency of `snapdir-core` and
+# `snapdir-cli` (and pervasive in the lock graph), so naming it here adds ZERO
+# crates to `Cargo.lock`. The shipped binary stays dependency-free (no shelling
+# out to fsync/sync).
+libc = "0.2"
+
 # --- SNAPPACK wire format (pack.rs) ------------------------------------------
 # `blake3` powers the INCREMENTAL payload hashing in `pack.rs`: obj payloads
 # stream through the hasher in O(1) memory, which the buffer-only
@@ -31,6 +40,17 @@ thiserror.workspace = true
 # `snapdir-core` already declares, so the lock graph gains no crate and the
 # deny.toml posture is unchanged.
 blake3 = "1.8.5"
+
+# --- SNAPPACK 1Z zstd transport encoding (pack.rs) ---------------------------
+# `zstd` wraps the WHOLE SNAPPACK body in one zstd frame for the additive
+# `SNAPPACK 1Z` form: the writer streams `record* "end\n"` through
+# `zstd::stream::write::Encoder` and the reader feeds `zstd::stream::read::Decoder`
+# to the UNCHANGED record parser (incremental BLAKE3 untouched; the 128B-header /
+# 64MiB-manifest / lying-len bounds all enforced on the DECOMPRESSED bytes). It
+# bundles libzstd via `zstd-sys` (cc/build.rs) — the SAME C-build pattern already
+# exercised by `blake3`, with no system zstd required — and is MIT/BSD-3 (license
+# clean for deny.toml). `ruzstd` is decode-only and is NOT used as the encoder.
+zstd = "0.13"
 
 # --- S3 store (s3:// + S3-compatible) ---------------------------------------
 # CRITICAL TLS constraint: the shipped binary statically links on musl, so the
