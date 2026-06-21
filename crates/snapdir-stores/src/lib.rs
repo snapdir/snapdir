@@ -79,7 +79,7 @@ pub use adaptive::{
     OpResult, OpSample,
 };
 pub use b2_store::B2Store;
-pub use file_store::{clonefile_hits, FileStore};
+pub use file_store::{clonefile_hits, cow_reflink_supported, FileStore, MaterializeMode};
 pub use gcs_store::{GcsLocation, GcsStore};
 pub use limits::{for_scheme, BackendLimits};
 pub use pack::{
@@ -97,7 +97,7 @@ pub use s3_store::{S3Location, S3Store};
 pub use shim::ExternalStore;
 pub use split::SplitStore;
 pub use stream::StreamStore;
-pub use sync::{sync_snapshot, SyncReport};
+pub use sync::{sync_snapshot, sync_snapshot_mirror, MirrorReport, SyncReport};
 pub use transfer::{
     classify_error, run_adaptive, run_concurrent, AdaptivePolicy as TransferAdaptivePolicy,
     BlockingRateLimiter, RateLimiter, TransferConfig,
