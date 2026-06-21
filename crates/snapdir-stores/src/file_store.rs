@@ -79,6 +79,27 @@ pub struct FileStore {
     copy_guards: HashMap<PathBuf, CopyGuard>,
 }
 
+/// How a manifest's file entries are written into a destination by
+/// [`FileStore::fetch_files_with_mode`].
+///
+/// [`MaterializeMode::Auto`] is the historical default: each file is a real,
+/// independent, editable inode (a `CoW` reflink where the filesystem supports
+/// it, else a plain byte copy). [`MaterializeMode::Linked`] is the zero-copy
+/// thin store-view: each file entry is a symlink into the local
+/// content-addressed object, and those objects are hardened to `0444` so the
+/// shared bytes cannot be corrupted through the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MaterializeMode {
+    /// Reflink-or-copy into an INDEPENDENT, EDITABLE dest inode (today's
+    /// default). Byte-for-byte [`Store::fetch_files`].
+    Auto,
+    /// Symlink each file entry into the LOCAL `.objects/<sharded>` object for
+    /// its checksum (zero-copy); the linked objects are hardened to `0444`
+    /// (read-only). Directories are still materialized as real directories.
+    Linked,
+}
+
 /// How [`copy_file`] actually moved the bytes — the trust input to whether
 /// [`persist`] may skip its post-copy re-hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +225,216 @@ impl FileStore {
     /// Absolute on-disk path of a manifest given its snapshot id.
     fn manifest_disk_path(&self, id: &str) -> PathBuf {
         self.root.join(manifest_path(id))
+    }
+
+    /// Materializes `manifest` into `dest` using an explicit
+    /// [`MaterializeMode`].
+    ///
+    /// * [`MaterializeMode::Auto`] is byte-for-byte [`Store::fetch_files`]
+    ///   (reflink-or-copy into independent, editable inodes).
+    /// * [`MaterializeMode::Linked`] writes each file entry as a symlink into
+    ///   the LOCAL content-addressed object for its checksum (zero-copy) and
+    ///   hardens those objects to `0444`; directories are real directories.
+    ///   A required object that is not resolvable to a real LOCAL store object
+    ///   is a hard [`StoreError::ObjectNotFound`] (no dangling symlink is
+    ///   left). Symlinking to a remote object is impossible — the genuine
+    ///   non-local-source refusal lives at the CLI/router layer; this method
+    ///   only ever links to the local `.objects` pool.
+    pub fn fetch_files_with_mode(
+        &self,
+        manifest: &Manifest,
+        dest: &Path,
+        mode: MaterializeMode,
+    ) -> Result<(), StoreError> {
+        match mode {
+            // Auto is the historical default — delegate to the unchanged
+            // trait method so it stays byte-for-byte today's behavior.
+            MaterializeMode::Auto => self.fetch_files(manifest, dest),
+            MaterializeMode::Linked => self.fetch_files_linked(manifest, dest),
+        }
+    }
+
+    /// Materializes `manifest` into `dest` via an **atomic staged swap**: the
+    /// complete destination tree is built fresh in a sibling *staging*
+    /// directory (reflink clones under [`MaterializeMode::Auto`] on a `CoW`
+    /// filesystem; symlinks into the local `.objects` pool under
+    /// [`MaterializeMode::Linked`]) and then swapped into place with a pair of
+    /// `rename`s. Because staging is rebuilt from the manifest, the swapped-in
+    /// `dest` is an EXACT mirror with no extraneous entries.
+    ///
+    /// The swap is `rename(dest -> dest.old-<tmp>)` then
+    /// `rename(staging -> dest)` then best-effort removal of the old tree. A
+    /// file descriptor held open on an old `dest` file keeps reading the
+    /// ORIGINAL inode's bytes across the swap (POSIX), so long-running readers
+    /// are never disrupted. If `dest` is absent, the staging dir is simply
+    /// renamed into place (plain materialize, no error).
+    ///
+    /// This path is **zero-copy only**. Under [`MaterializeMode::Auto`] it
+    /// consults [`cow_reflink_supported`] for `dest`'s filesystem first; if the
+    /// target is NOT reflink-capable (e.g. `SNAPDIR_CLONEFILE=0` or a non-CoW
+    /// filesystem), staging in `Auto` mode would duplicate every byte, so it
+    /// returns a typed [`StoreError::Backend`] rather than silently byte-copying
+    /// — and `dest` is left byte-for-byte untouched (no partial apply, no
+    /// leftover staging/`dest.old` sibling). [`MaterializeMode::Linked`] is
+    /// zero-copy on ANY filesystem (symlinks), so it is never refused on that
+    /// ground.
+    ///
+    /// **Swap-or-nothing:** if staging fails partway (e.g. a manifest object is
+    /// missing from the pool), `dest` is touched only by the final rename, which
+    /// never runs — the original tree remains byte-for-byte intact and the
+    /// partial staging dir is cleaned up.
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::Backend`] if `Auto` is requested on a non-CoW target
+    ///   (zero-copy refusal).
+    /// - Any error surfaced by [`fetch_files_with_mode`](Self::fetch_files_with_mode)
+    ///   while building the staging tree (e.g. [`StoreError::ObjectNotFound`]).
+    /// - [`StoreError::Io`] on a filesystem failure during the swap itself.
+    #[cfg(unix)]
+    pub fn fetch_files_atomic(
+        &self,
+        manifest: &Manifest,
+        dest: &Path,
+        mode: MaterializeMode,
+    ) -> Result<(), StoreError> {
+        // Zero-copy guard (mode-aware): Auto staging on a non-CoW target would
+        // byte-copy every object, which this path refuses. Linked staging is
+        // symlinks (zero-copy on any FS), so it is never refused here. Probe
+        // BEFORE creating any staging sibling so a refusal leaves no residue and
+        // `dest` untouched.
+        if matches!(mode, MaterializeMode::Auto) && !cow_reflink_supported(dest)? {
+            return Err(StoreError::Backend {
+                message: format!(
+                    "atomic swap unavailable: {} has no copy-on-write (reflink); \
+                     refusing to duplicate bytes (zero-copy only)",
+                    dest.display()
+                ),
+                source: None,
+            });
+        }
+
+        // The staging dir must be a sibling of `dest` (same filesystem) so the
+        // final rename is atomic and reflinks/hardlinks stay same-FS. Mirror a
+        // plain checkout: create `dest`'s parent if it is missing.
+        let parent = match dest.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            // `dest` is a bare name / filesystem root — stage under cwd's `.`.
+            _ => PathBuf::from("."),
+        };
+        fs::create_dir_all(&parent)?;
+        let staging = temp_sibling(&parent.join(".snapdir-staging"));
+        // A leftover staging dir from a crashed prior run must not block us.
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)?;
+
+        // Build the COMPLETE tree into staging. On ANY failure, remove the
+        // partial staging dir and propagate — `dest` is never touched, so the
+        // original tree stays byte-for-byte intact (swap-or-nothing).
+        if let Err(err) = self.fetch_files_with_mode(manifest, &staging, mode) {
+            restore_writable_tree(&staging);
+            let _ = fs::remove_dir_all(&staging);
+            return Err(err);
+        }
+
+        // Swap atomically. If `dest` is absent there is no original to rename
+        // aside — a single rename of staging into place is the whole operation.
+        match fs::symlink_metadata(dest) {
+            Ok(_) => {
+                // `dest` exists: rename it aside, swap staging in, drop the old.
+                let old = temp_sibling(&parent.join(".snapdir-dest-old"));
+                let _ = fs::remove_dir_all(&old);
+                if let Err(err) = fs::rename(dest, &old) {
+                    restore_writable_tree(&staging);
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(StoreError::Io(err));
+                }
+                if let Err(err) = fs::rename(&staging, dest) {
+                    // Roll back: restore the original tree, drop staging.
+                    let _ = fs::rename(&old, dest);
+                    restore_writable_tree(&staging);
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(StoreError::Io(err));
+                }
+                // The old tree is renamed aside; held-open fds keep reading its
+                // inodes. Drop it best-effort (Linked checkouts harden objects
+                // to 0444, but the dest entries are symlinks/dirs, so removal of
+                // the swapped-aside tree only unlinks links + dirs).
+                restore_writable_tree(&old);
+                let _ = fs::remove_dir_all(&old);
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Dest-absent: plain materialize — just rename staging in.
+                if let Err(err) = fs::rename(&staging, dest) {
+                    restore_writable_tree(&staging);
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(StoreError::Io(err));
+                }
+            }
+            Err(e) => {
+                restore_writable_tree(&staging);
+                let _ = fs::remove_dir_all(&staging);
+                return Err(StoreError::Io(e));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// `--linked` materialization: directories become real directories and
+    /// each file entry becomes a `0444`-hardened, atomically-created symlink
+    /// into the local `.objects` pool. Zero-copy: no object is duplicated.
+    #[cfg(unix)]
+    fn fetch_files_linked(&self, manifest: &Manifest, dest: &Path) -> Result<(), StoreError> {
+        for entry in manifest.entries() {
+            let rel = strip_leading_dot_slash(&entry.path);
+            let target = dest.join(rel);
+            match entry.path_type {
+                PathType::Directory => {
+                    fs::create_dir_all(&target)?;
+                }
+                PathType::File => {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let object = self.object_disk_path(&entry.checksum);
+                    // The object must resolve to a real LOCAL store object — a
+                    // missing object is the stores-API analogue of a non-local
+                    // / unreachable source. Hard-error BEFORE creating any link
+                    // so no dangling symlink is ever left behind.
+                    if !object.exists() {
+                        return Err(StoreError::ObjectNotFound {
+                            checksum: entry.checksum.clone(),
+                        });
+                    }
+                    // Read-only-enforce the shared object (0444) so a write
+                    // THROUGH the link fails and the shared bytes cannot be
+                    // corrupted. Never re-chmod the object to the (writable)
+                    // manifest mode.
+                    harden_object_readonly(&object)?;
+                    // Atomic symlink: temp-sibling symlink + rename, mirroring
+                    // `persist`'s temp+rename discipline, so an idempotent
+                    // re-run never trips on an existing link.
+                    atomic_symlink(&object, &target)?;
+                    if let Some(m) = self.meter.as_deref() {
+                        m.object_started();
+                        m.object_finished();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Linked materialization is unix-only (it relies on symlinks + `0444`
+    /// hardening). On non-unix targets it surfaces a typed [`StoreError`].
+    #[cfg(not(unix))]
+    fn fetch_files_linked(&self, _manifest: &Manifest, _dest: &Path) -> Result<(), StoreError> {
+        Err(StoreError::Backend {
+            message: "linked materialization is unsupported on this platform (no symlinks)"
+                .to_owned(),
+            source: None,
+        })
     }
 
     /// Copies a batch of `(source, target, expected_checksum)` jobs through
@@ -596,6 +827,25 @@ impl StreamStore for FileStore {
             id,
             &Blake3Hasher::new(),
         )
+    }
+
+    fn supports_mirror(&self) -> bool {
+        // A local `file://` store can delete a manifest file atomically — it is
+        // the only backend that supports the manifest-set mirror (`sync --delete`).
+        true
+    }
+
+    fn delete_manifest(&self, id: &str) -> Result<(), StoreError> {
+        // Remove ONLY the sharded `.manifests/<id>` manifest file; NO object is
+        // ever touched (object GC is out of scope). Removing an already-absent
+        // manifest is idempotent (`Ok(())`), matching the listing/dedup
+        // discipline elsewhere.
+        let path = self.manifest_disk_path(id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(StoreError::Io(err)),
+        }
     }
 
     fn list_manifest_ids(&self) -> Result<Vec<String>, StoreError> {
@@ -1118,6 +1368,79 @@ fn try_clonefile(source: &Path, target: &Path) -> Result<bool, StoreError> {
     Ok(true)
 }
 
+/// Hardens a local store object to `0444` (read-only for everyone) so a write
+/// THROUGH a symlinked dest file fails (`PermissionDenied`) and the shared
+/// object bytes cannot be corrupted. Idempotent — re-running over an already
+/// `0444` object is a no-op.
+///
+/// Unlinking the object still only needs write on its PARENT shard directory
+/// (not the object itself), so a `0444` object stays GC-able. The clone
+/// fast-path opens the object `O_RDONLY`, so `clonefile`/`FICLONE` read a
+/// `0444` source fine.
+#[cfg(unix)]
+fn harden_object_readonly(object: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(object)?;
+    let mut perms = meta.permissions();
+    if perms.mode() & 0o7777 != 0o444 {
+        perms.set_mode(0o444);
+        fs::set_permissions(object, perms)?;
+    }
+    Ok(())
+}
+
+/// Atomically (re)points `link` at `target` via a temp-sibling symlink +
+/// rename, mirroring [`persist`]'s temp+rename discipline. A `rename` over an
+/// existing path replaces it atomically, so an idempotent re-run never trips on
+/// an existing link.
+#[cfg(unix)]
+fn atomic_symlink(target: &Path, link: &Path) -> Result<(), StoreError> {
+    let tmp = temp_sibling(link);
+    // A leftover temp from a crashed prior run must not block us.
+    let _ = fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(target, &tmp)?;
+    // `fs::rename` replaces an existing destination atomically (including an
+    // existing symlink from a prior linked checkout).
+    if let Err(err) = fs::rename(&tmp, link) {
+        let _ = fs::remove_file(&tmp);
+        return Err(StoreError::Io(err));
+    }
+    Ok(())
+}
+
+/// Ahead-of-time probe: does the filesystem hosting `dest` support a zero-copy
+/// `CoW` reflink (`clonefile` on macOS / `FICLONE` on Linux)?
+///
+/// It trial-clones a tiny temp file into a sibling of `dest` (same directory,
+/// so the probe runs on the SAME filesystem the real materialization will use,
+/// avoiding an `EXDEV` false negative) and reports whether the copy came back
+/// [`CopyMethod::Cloned`]. The probe temps are always cleaned up. Respects the
+/// `SNAPDIR_CLONEFILE` knob (a forced-off clone reports `false`). Used later by
+/// the atomic-swap path to decide its strategy ahead of time.
+///
+/// `dest` is the eventual destination path (need not exist yet); its PARENT
+/// directory is created if missing and is where the probe runs.
+pub fn cow_reflink_supported(dest: &Path) -> Result<bool, StoreError> {
+    let parent = dest.parent().unwrap_or(dest);
+    fs::create_dir_all(parent)?;
+
+    let probe_src = temp_sibling(&parent.join(".snapdir-cow-probe"));
+    let probe_dst = temp_sibling(&parent.join(".snapdir-cow-probe"));
+
+    // Tiny payload — a reflink shares extents regardless of size; a byte is
+    // enough to exercise the clone path.
+    if let Err(err) = fs::write(&probe_src, b"x") {
+        let _ = fs::remove_file(&probe_src);
+        return Err(StoreError::Io(err));
+    }
+
+    let result = copy_file(&probe_src, &probe_dst);
+    let _ = fs::remove_file(&probe_src);
+    let _ = fs::remove_file(&probe_dst);
+
+    Ok(matches!(result?, CopyMethod::Cloned))
+}
+
 /// Builds a unique temp sibling path for `target` (same directory, so the
 /// final rename stays on one filesystem). Uses pid + a process-monotonic
 /// counter so concurrent persists never collide.
@@ -1134,6 +1457,32 @@ fn temp_sibling(target: &Path) -> PathBuf {
     match target.parent() {
         Some(parent) => parent.join(tmp_name),
         None => PathBuf::from(tmp_name),
+    }
+}
+
+/// Best-effort restore of `u+rwx` on every directory under `root` (and `root`
+/// itself) so a hardened staging / swapped-aside tree can be torn down by
+/// `remove_dir_all` without an `EACCES` on a read-only directory. Files are
+/// left alone (unlinking them only needs a writable parent); symlinks are never
+/// chased. Used only on the atomic-swap cleanup paths.
+#[cfg(unix)]
+fn restore_writable_tree(root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(md) = fs::symlink_metadata(root) else {
+        return;
+    };
+    if md.file_type().is_symlink() {
+        return;
+    }
+    if md.is_dir() {
+        let mut perms = md.permissions();
+        perms.set_mode(perms.mode() | 0o700);
+        let _ = fs::set_permissions(root, perms);
+        if let Ok(rd) = fs::read_dir(root) {
+            for entry in rd.flatten() {
+                restore_writable_tree(&entry.path());
+            }
+        }
     }
 }
 
