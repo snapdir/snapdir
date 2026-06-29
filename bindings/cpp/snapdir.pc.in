@@ -1,0 +1,12 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: snapdir
+Description: C++ RAII bindings for snapdir (content-addressed directory snapshots over the snapdir C ABI)
+URL: https://snapdir.org
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lsnapdir_ffi
+Libs.private: -lpthread -ldl -lm

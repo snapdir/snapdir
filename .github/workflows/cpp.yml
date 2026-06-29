@@ -1,0 +1,144 @@
+name: C++
+
+# Build and test the snapdir C++ RAII binding (header-only snapdir.hpp over the frozen
+# C ABI), run the adversary-authored api test suite under clang++ ASan/UBSan and g++,
+# syntax-check the C99 header, and validate manifest-parity (45 PASS / 0 FAIL / 3 SKIP).
+#
+# Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Everything is
+# baked into the image (rust 1.91.1, clang 14, g++, make, pkg-config). NO apt, NO
+# toolchain-install steps, NO network required.
+#
+# DEFERRED legs (clearly scoped — do NOT implement until credits restored):
+#   - CMake FindSnapdir / FetchContent example build
+#     (image has no cmake; deferred to credited release CI)
+#   - Windows / macOS / cross-arch legs
+#     (act is linux/arm64-only; these cannot run under the local act harness)
+# Both are intentionally absent so `act` remains green.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "bindings/cpp/**"
+      - "tests/golden/**"
+      - "include/snapdir.h"
+      - "crates/snapdir-ffi/**"
+      - ".github/workflows/cpp.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "bindings/cpp/**"
+      - "tests/golden/**"
+      - "include/snapdir.h"
+      - "crates/snapdir-ffi/**"
+      - ".github/workflows/cpp.yml"
+
+concurrency:
+  group: cpp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # cpp: build snapdir-ffi, vendor artifacts, run api tests under both
+  # clang++ and g++, ASan/UBSan quality checks, and manifest parity (45/0/3).
+  #
+  # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
+  # rust 1.91.1, clang 14, g++, make). NO apt, NO dtolnay/rust-toolchain.
+  # --------------------------------------------------------------------------
+  cpp:
+    name: C++ (clang++/g++ + ASan/UBSan + parity)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Step 1: Build FFI staticlib (release — the cpp binding links .a)
+      # ------------------------------------------------------------------
+      - name: Build snapdir-ffi (release staticlib)
+        run: cargo build --release -p snapdir-ffi --locked
+
+      # ------------------------------------------------------------------
+      # Step 2: Vendor the .a and header into bindings/cpp/{lib,include}
+      # ------------------------------------------------------------------
+      - name: Vendor libsnapdir_ffi.a + snapdir.h into bindings/cpp
+        run: |
+          mkdir -p bindings/cpp/lib bindings/cpp/include
+          cp -f target/release/libsnapdir_ffi.a bindings/cpp/lib/
+          cp -f include/snapdir.h bindings/cpp/include/
+          echo "vendor: OK (libsnapdir_ffi.a + snapdir.h)"
+
+      # ------------------------------------------------------------------
+      # Step 3: API tests via Makefile (g++ clean test)
+      # ------------------------------------------------------------------
+      - name: API tests (Makefile — g++ clean test)
+        run: make -C bindings/cpp clean test
+
+      # ------------------------------------------------------------------
+      # Step 4: Quality — ASan/UBSan (clang++), g++ -Werror, C99 header
+      # ------------------------------------------------------------------
+      - name: Quality (ASan/UBSan + g++ + C99 header syntax-check)
+        run: |
+          cd bindings/cpp
+          clang++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined -g test/cpp_api.cpp -Iinclude -o /tmp/cppt -Llib -lsnapdir_ffi -lpthread -ldl -lm && /tmp/cppt
+          g++ -std=c++20 -Wall -Wextra -Werror test/cpp_api.cpp -Iinclude -o /tmp/cppt_gcc -Llib -lsnapdir_ffi -lpthread -ldl -lm && /tmp/cppt_gcc
+          clang -std=c99 -Wall -Wextra -Werror -fsyntax-only include/snapdir.h
+
+      # ------------------------------------------------------------------
+      # Step 5: Manifest parity (45 PASS / 0 FAIL / 3 SKIP)
+      # Build the C++ parity driver binary, then run run_parity.sh.
+      # A 3× retry loop guards against the virtiofs flake seen in earlier
+      # gate runs; on a fresh act checkout a single run is usually fine.
+      # ------------------------------------------------------------------
+      - name: Parity — build cpp-driver-bin
+        run: |
+          g++ -std=c++20 -O2 bindings/cpp/cmd/parity_driver.cpp \
+            -Ibindings/cpp/include \
+            -o tests/golden/drivers/cpp-driver-bin \
+            -Lbindings/cpp/lib -lsnapdir_ffi -lpthread -ldl -lm
+          echo "driver build: OK"
+
+      - name: Parity — run harness (45/0/3, 3× retry for virtiofs flake)
+        run: |
+          chmod -R u+rwx tests/golden/work 2>/dev/null || true
+          rm -rf tests/golden/work 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if tests/golden/run_parity.sh --driver tests/golden/drivers/cpp.sh; then
+              echo "parity: OK (attempt ${attempt})"
+              exit 0
+            fi
+            echo "parity attempt ${attempt} failed; retrying..." >&2
+            chmod -R u+rwx tests/golden/work 2>/dev/null || true
+            rm -rf tests/golden/work 2>/dev/null || true
+          done
+          echo "parity: FAILED after 3 attempts" >&2
+          exit 1
+
+  # --------------------------------------------------------------------------
+  # deferred: CMake + Windows/macOS/cross-arch (intentionally disabled).
+  #
+  # CMake FindSnapdir/FetchContent example and Windows/macOS/cross-arch legs
+  # are deferred to credited release CI — the image has no cmake and act is
+  # linux/arm64-only. Remove `if: false` and implement when GH credits are
+  # restored and these environments are available.
+  # --------------------------------------------------------------------------
+  deferred-cmake-cross:
+    name: CMake + cross-arch (deferred)
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: CMake FindSnapdir example (deferred)
+        run: echo "CMake FindSnapdir/FetchContent — deferred to credited release CI (image has no cmake)."
+      - name: Windows/macOS cross (deferred)
+        run: echo "Windows/macOS/cross-arch legs — deferred to credited release CI (act is linux/arm64-only)."

@@ -1,0 +1,214 @@
+name: FFI
+
+# Build and test the snapdir-ffi C ABI (cdylib + staticlib), verify the cbindgen header is
+# deterministic, run the 3 M1 C adversary clusters under clang ASan/UBSan, validate with
+# valgrind memcheck, and confirm pkg-config metadata is well-formed.
+#
+# Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Everything is baked
+# into the image (rust 1.91.1, cbindgen 0.28, clang 14, libclang-rt-14, valgrind 3.19,
+# pkg-config). NO apt, NO toolchain-install steps, NO network required.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "crates/snapdir-ffi/**"
+      - "crates/snapdir-api/**"
+      - "include/snapdir.h"
+      - "packaging/snapdir.pc"
+      - ".github/workflows/ffi.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "crates/snapdir-ffi/**"
+      - "crates/snapdir-api/**"
+      - "include/snapdir.h"
+      - "packaging/snapdir.pc"
+      - ".github/workflows/ffi.yml"
+
+concurrency:
+  group: ffi-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # linux: build snapdir-ffi, verify cbindgen header, run 3 C ASan/UBSan
+  # clusters, valgrind memcheck, and pkg-config validate.
+  #
+  # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
+  # rust 1.91.1, clang 14, libclang-rt-14, cbindgen 0.28, valgrind 3.19).
+  # NO apt, NO dtolnay/rust-toolchain — everything is already in the image.
+  # --------------------------------------------------------------------------
+  linux:
+    name: FFI (Linux, ASan/UBSan + valgrind)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Step 1: Build cdylib + staticlib
+      # ------------------------------------------------------------------
+      - name: Build snapdir-ffi (cdylib + staticlib)
+        run: cargo build -p snapdir-ffi --locked
+
+      - name: Confirm library artifacts exist
+        run: |
+          test -f target/debug/libsnapdir_ffi.so || { echo "MISSING: libsnapdir_ffi.so"; exit 1; }
+          test -f target/debug/libsnapdir_ffi.a  || { echo "MISSING: libsnapdir_ffi.a"; exit 1; }
+          echo "artifacts: OK (libsnapdir_ffi.so + libsnapdir_ffi.a)"
+
+      # ------------------------------------------------------------------
+      # Step 2: cbindgen header diff-check (deterministic regeneration)
+      # ------------------------------------------------------------------
+      - name: Regenerate header via cbindgen and diff-check
+        run: |
+          cbindgen --config crates/snapdir-ffi/cbindgen.toml \
+            --crate snapdir-ffi \
+            -o /tmp/snapdir.h
+          diff /tmp/snapdir.h include/snapdir.h || {
+            echo "FAIL: include/snapdir.h drifted from cbindgen output — run 'cbindgen … -o include/snapdir.h' and commit."
+            exit 1
+          }
+          echo "cbindgen diff-check: OK (header is deterministic)"
+
+      - name: Syntax-check header with clang
+        run: clang -std=c99 -fsyntax-only -Iinclude include/snapdir.h
+        # Any warning/error here is a real problem with the generated header.
+
+      # ------------------------------------------------------------------
+      # Step 3a: C cluster 1/3 — m1_memory_contract (ASan/UBSan)
+      # ------------------------------------------------------------------
+      - name: Compile m1_memory_contract.c
+        run: |
+          clang -std=c11 \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -g \
+            -Wall -Wextra \
+            -Iinclude \
+            -Ltarget/debug \
+            -o /tmp/m1_memory_contract \
+            crates/snapdir-ffi/tests/c/m1_memory_contract.c \
+            -lsnapdir_ffi
+
+      - name: Run m1_memory_contract (ASan/UBSan)
+        run: |
+          LD_LIBRARY_PATH=target/debug /tmp/m1_memory_contract
+          echo "m1_memory_contract: OK"
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+
+      # ------------------------------------------------------------------
+      # Step 3b: C cluster 2/3 — m1_abi_surface (ASan/UBSan)
+      # ------------------------------------------------------------------
+      - name: Compile m1_abi_surface.c
+        run: |
+          clang -std=c11 \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -g \
+            -Wall -Wextra \
+            -Iinclude \
+            -Ltarget/debug \
+            -o /tmp/m1_abi_surface \
+            crates/snapdir-ffi/tests/c/m1_abi_surface.c \
+            -lsnapdir_ffi
+
+      - name: Run m1_abi_surface (ASan/UBSan)
+        run: |
+          LD_LIBRARY_PATH=target/debug /tmp/m1_abi_surface
+          echo "m1_abi_surface: OK"
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+
+      # ------------------------------------------------------------------
+      # Step 3c: C cluster 3/3 — m1_init (ASan/UBSan + -lpthread)
+      # ------------------------------------------------------------------
+      - name: Compile m1_init.c
+        run: |
+          clang -std=c11 \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -g \
+            -Wall -Wextra \
+            -Iinclude \
+            -Ltarget/debug \
+            -o /tmp/m1_init \
+            crates/snapdir-ffi/tests/c/m1_init.c \
+            -lsnapdir_ffi \
+            -lpthread
+
+      - name: Run m1_init (ASan/UBSan, 16-pthread init storm)
+        run: |
+          LD_LIBRARY_PATH=target/debug /tmp/m1_init
+          echo "m1_init: OK"
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+
+      # ------------------------------------------------------------------
+      # Step 4: valgrind zero-leak on the abi-surface smoke binary
+      # ------------------------------------------------------------------
+      - name: valgrind zero-leak (m1_abi_surface, no ASan binary)
+        run: |
+          # Build a non-ASan binary for valgrind (ASan + valgrind conflict).
+          clang -std=c11 \
+            -fno-omit-frame-pointer \
+            -g \
+            -Wall -Wextra \
+            -Iinclude \
+            -Ltarget/debug \
+            -o /tmp/as \
+            crates/snapdir-ffi/tests/c/m1_abi_surface.c \
+            -lsnapdir_ffi
+          LD_LIBRARY_PATH=target/debug \
+          valgrind \
+            --leak-check=full \
+            --error-exitcode=99 \
+            --suppressions=crates/snapdir-ffi/tests/c/valgrind.supp \
+            /tmp/as
+          echo "valgrind: zero leak (definitely/indirectly lost = 0, ERROR SUMMARY 0)"
+
+      # ------------------------------------------------------------------
+      # Step 5: pkg-config validate
+      # ------------------------------------------------------------------
+      - name: pkg-config validate (packaging/snapdir.pc)
+        run: |
+          pkg-config --validate packaging/snapdir.pc
+          echo "pkg-config: OK"
+
+  # --------------------------------------------------------------------------
+  # cross-prebuild: macOS/Windows/arm64 prebuilds (DEFERRED).
+  #
+  # macOS/Windows/arm64 prebuilds are deferred to credited release CI —
+  # act is Linux-only and cannot run these legs locally. This job is
+  # intentionally skipped (if: false) so `act` never attempts it and it
+  # does not block the linux job.
+  # --------------------------------------------------------------------------
+  cross-prebuild:
+    name: Cross prebuild (macOS/Windows — deferred)
+    runs-on: ubuntu-latest
+    # macOS/Windows/arm64 prebuilds deferred to credited release CI (act is linux-only).
+    # This leg is intentionally disabled so that the local `act` run (linux/amd64 only)
+    # never fails on missing macOS/Windows runners. Remove the `if: false` when GitHub
+    # Actions credits are restored and cross-compilation is wired up.
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build macOS dylib (cross)
+        run: echo "macOS cross-build — not yet implemented; deferred to credited release CI."
+      - name: Build Windows dll (cross)
+        run: echo "Windows cross-build — not yet implemented; deferred to credited release CI."

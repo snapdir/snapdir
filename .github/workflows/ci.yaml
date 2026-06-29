@@ -58,8 +58,17 @@ jobs:
       - name: Install actionlint
         run: |
           VER=1.7.12
-          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz" | tar -xz actionlint
-          sudo mv actionlint /usr/local/bin/actionlint
+          case "$(uname -m)" in
+            x86_64)           ARCH=amd64 ;;
+            aarch64|arm64)    ARCH=arm64 ;;
+            *)                echo "Unsupported arch: $(uname -m)" && exit 1 ;;
+          esac
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_${ARCH}.tar.gz" | tar -xz actionlint
+          if command -v sudo >/dev/null 2>&1; then
+            sudo mv actionlint /usr/local/bin/actionlint
+          else
+            mv actionlint /usr/local/bin/actionlint
+          fi
           actionlint --version
 
       - name: actionlint
@@ -301,6 +310,37 @@ jobs:
             cargo build --workspace --all-features --locked \
               --target x86_64-unknown-linux-musl
           fi
+
+  # --------------------------------------------------------------------------
+  # MSRV: prove snapdir-api (and the full workspace) builds at the pinned
+  # minimum supported Rust version (1.91.1, from [workspace.package].rust-version).
+  # This is a focused build gate — the test matrix already covers MSRV in its
+  # {1.91.1, stable, beta} leg, but that leg runs all-features tests which can
+  # mask a pure compilation failure in a single crate.  This job is a fast,
+  # explicit signal that the snapdir-api facade crate stays inside the guarantee.
+  # --------------------------------------------------------------------------
+  msrv:
+    name: MSRV (1.91.1)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.91.1)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Build snapdir-api at MSRV (locked)
+        run: cargo +1.91.1 build -p snapdir-api --locked
+
+      - name: Build workspace at MSRV (locked)
+        run: cargo +1.91.1 build --workspace --locked
 
   # --------------------------------------------------------------------------
   # Doctests: run separately so they are never silently skipped.

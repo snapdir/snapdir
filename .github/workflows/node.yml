@@ -1,0 +1,141 @@
+name: Node
+
+# Build and test the snapdir Node.js binding (napi-rs — builds its own native addon via
+# cargo wrapping snapdir-api), run the adversary-authored test suite (vitest), type-check
+# with tsc --strict, lint, and validate manifest-parity (45 PASS / 0 FAIL / 3 SKIP).
+#
+# Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Node and npm
+# are baked into the image; napi-rs compiles the Rust addon (snapdir-api — NOT the C ABI,
+# no ffi-vendor step). Network access is required for npm install (node_modules is
+# gitignored; no baked npm cache in image).
+#
+# DEFERRED legs (clearly scoped — do NOT implement until credits restored):
+#   - Cross-OS/arch prebuild matrix (6 node targets: linux-x64, linux-arm64,
+#     linux-x64-musl, linux-arm64-musl, darwin-x64, darwin-arm64, win32-x64-msvc)
+#     and `npm pack` / npm publish → deferred to credited release CI
+#     (act is linux/arm64-only; these cannot run under the local act harness)
+# Both are intentionally absent so `act` remains green.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "bindings/node/**"
+      - "tests/golden/**"
+      - "crates/snapdir-api/**"
+      - "crates/snapdir-core/**"
+      - ".github/workflows/node.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "bindings/node/**"
+      - "tests/golden/**"
+      - "crates/snapdir-api/**"
+      - "crates/snapdir-core/**"
+      - ".github/workflows/node.yml"
+
+concurrency:
+  group: node-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # node: npm install (fetches deps from registry — image has no baked npm
+  # cache), napi build (compiles Rust addon via cargo), tsc --strict, lint,
+  # vitest run, and manifest parity (45/0/3).
+  #
+  # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
+  # rust 1.91.1, node 18+, npm). NO apt, NO dtolnay/rust-toolchain.
+  # napi-rs wraps snapdir-api directly — NO snapdir-ffi C ABI, NO ffi-vendor step.
+  # --------------------------------------------------------------------------
+  node:
+    name: "Node (napi-rs: tsc --strict + vitest + parity)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Step 1: Install npm deps (fetches from registry — node_modules is
+      # gitignored and the image has no baked npm cache).
+      # ------------------------------------------------------------------
+      - name: Install deps (npm install)
+        run: cd bindings/node && npm install --no-audit --no-fund
+
+      # ------------------------------------------------------------------
+      # Step 2: Build napi addon (cargo compiles snapdir-api into .node)
+      # ------------------------------------------------------------------
+      - name: Build napi addon
+        run: cd bindings/node && npm run build
+
+      # ------------------------------------------------------------------
+      # Step 3: Type-check (tsc --strict --noEmit)
+      # ------------------------------------------------------------------
+      - name: Type-check (tsc --strict --noEmit)
+        run: cd bindings/node && npx tsc --strict --noEmit
+
+      # ------------------------------------------------------------------
+      # Step 4: Lint (eslint flat config — test/**/*.ts + scripts/**/*.cjs)
+      # ------------------------------------------------------------------
+      - name: Lint (eslint)
+        run: cd bindings/node && npm run lint
+
+      # ------------------------------------------------------------------
+      # Step 5: Test suite (vitest run)
+      # ------------------------------------------------------------------
+      - name: Test (vitest run)
+        run: cd bindings/node && npm test
+
+      # ------------------------------------------------------------------
+      # Step 6: Parity (45 PASS / 0 FAIL / 3 SKIP)
+      # The node.sh driver delegates to node_driver.mjs (already in tree).
+      # A 3× settle/retry loop guards against the virtiofs flake seen in
+      # earlier gate runs; on a fresh act checkout a single run is usually fine.
+      # ------------------------------------------------------------------
+      - name: Parity — run harness (45/0/3, 3× retry for virtiofs flake)
+        run: |
+          chmod -R u+rwx tests/golden/work 2>/dev/null || true
+          rm -rf tests/golden/work 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if tests/golden/run_parity.sh --driver tests/golden/drivers/node.sh; then
+              echo "parity: OK (attempt ${attempt})"
+              exit 0
+            fi
+            echo "parity attempt ${attempt} failed; retrying..." >&2
+            chmod -R u+rwx tests/golden/work 2>/dev/null || true
+            rm -rf tests/golden/work 2>/dev/null || true
+          done
+          echo "parity: FAILED after 3 attempts" >&2
+          exit 1
+
+  # --------------------------------------------------------------------------
+  # deferred: cross-OS/arch prebuild matrix + npm pack/publish
+  # (intentionally disabled).
+  #
+  # Building per-target prebuilt .node addons for 6 napi targets (linux-x64,
+  # linux-arm64, linux-x64-musl, linux-arm64-musl, darwin-x64, darwin-arm64,
+  # win32-x64-msvc) and npm pack/publish are deferred to credited release CI —
+  # act is linux/arm64-only and cannot run these targets. Remove `if: false`
+  # and implement when GH credits are restored and cross-compilation/OS matrix
+  # runners are available.
+  # --------------------------------------------------------------------------
+  deferred-cross-prebuild:
+    name: Cross-OS/arch prebuild + npm publish (deferred)
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cross-OS/arch prebuild matrix (deferred)
+        run: echo "6-target napi prebuild matrix (linux-x64/arm64, musl, darwin, win32) — deferred to credited release CI (act is linux/arm64-only)."
+      - name: npm pack / publish (deferred)
+        run: echo "npm pack + publish — deferred to credited release CI."

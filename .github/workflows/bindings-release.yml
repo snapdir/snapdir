@@ -1,0 +1,309 @@
+name: Bindings Release
+
+# Dry-run packaging for all 6 language bindings (node, python, go, cpp, zig, java)
+# plus cargo package for the Rust crates. NO registry pushes — all steps are local-pack
+# only. Each step mirrors the proven-green *-pack gate from .gatesmith/gates.yaml.
+#
+# Deferred: real registry pushes (npm/PyPI/Maven/crates.io/go-tag), GPG/OSSRH signing,
+# and cross-OS/arch prebuild matrices — see the deferred-publish job below.
+#
+# Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Everything is
+# baked into the image (rust 1.91.1, zig 0.13, node/npm, go, gcc, clang++, g++, make,
+# javac+java JDK-17, uv, python3, pkg-config). NO apt, NO toolchain-install steps.
+# Zig runs amd64-emulated under qemu — the zig step can take ~8-10 min; do not abort early.
+#
+# Run locally with:
+#   act -W .github/workflows/bindings-release.yml --pull=false -P ubuntu-latest=snapdir-bindings:dev
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "bindings/**"
+      - "crates/**"
+      - "include/snapdir.h"
+      - ".github/workflows/bindings-release.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "bindings/**"
+      - "crates/**"
+      - "include/snapdir.h"
+      - ".github/workflows/bindings-release.yml"
+
+concurrency:
+  group: bindings-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # release: sequential dry-run packaging for all 6 bindings + cargo package.
+  # Each step mirrors the exact *-pack gate verification command (docker wrapper
+  # stripped — steps run inside the image already).
+  # No registry pushes — local-pack only. See deferred-publish for what's deferred.
+  #
+  # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
+  # rust 1.91.1, zig 0.13, node/npm, go, gcc, clang++, g++, make, javac+java JDK-17,
+  # uv, python3, pkg-config). NO apt, NO dtolnay/rust-toolchain.
+  # --------------------------------------------------------------------------
+  release:
+    name: Bindings release (local-pack, all artifacts)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Step 1: Build shared FFI staticlib + cdylib (release).
+      # staticlib (.a) is linked by go/cpp/zig; cdylib (.so) is dlopen'd by java.
+      # Mirrors the shared ffi-vendor prefix in every ffi-consuming pack gate.
+      # ------------------------------------------------------------------
+      - name: Build snapdir-ffi (release — staticlib + cdylib)
+        run: cargo build --release -p snapdir-ffi --locked
+
+      # ------------------------------------------------------------------
+      # Step 2: cargo package (dry-run) for the binding-relevant Rust crates.
+      # --no-verify skips the build+test verify pass (keeps it fast).
+      # Produces target/package/snapdir-{api,ffi}-*.crate (collected in step 10).
+      # ------------------------------------------------------------------
+      - name: cargo package — snapdir-api (local dry-run)
+        # --allow-dirty: act binds the working tree (untracked release files);
+        # --no-verify: skip the rebuild (build verified above + by the FFI step).
+        # snapdir-api's deps (snapdir-core/-stores/-catalog 1.10.0) are on crates.io,
+        # so this packages cleanly.
+        run: cargo package --no-verify --allow-dirty -p snapdir-api
+
+      - name: cargo package — snapdir-ffi (local dry-run; api-on-crates.io deferred)
+        # snapdir-ffi depends on snapdir-api by path+version; `cargo package` resolves
+        # that dep against the crates.io index, where snapdir-api is NOT YET published.
+        # So a clean local package of snapdir-ffi is only possible AFTER snapdir-api is
+        # published — that ordering belongs to the deferred `publish-crates` checkpoint.
+        # Here we attempt it best-effort and record the expected publish-order constraint
+        # rather than failing the dry-run pipeline.
+        run: |
+          if cargo package --no-verify --allow-dirty -p snapdir-ffi 2>/tmp/ffi-pkg.err; then
+            echo "FFI_PACKAGE_OK"
+          else
+            if grep -q "no matching package named .snapdir-api" /tmp/ffi-pkg.err; then
+              echo "::warning::cargo package snapdir-ffi deferred — needs snapdir-api published to crates.io first (publish-crates ordering); expected for the pre-publish dry-run"
+              echo "FFI_PACKAGE_DEFERRED"
+            else
+              cat /tmp/ffi-pkg.err >&2
+              exit 1
+            fi
+          fi
+
+      # ------------------------------------------------------------------
+      # Step 3: Node pack (dry-run) — mirrors node-pack gate exactly.
+      # napi-rs builds the Rust addon (snapdir-api) via cargo — no snapdir-ffi.
+      # npm install fetches @napi-rs/cli (gitignored, not baked in image).
+      # Assertions: index.mjs, index.d.ts, a .node, README.md, LICENSE present;
+      # test/ and src/lib.rs absent.
+      # ------------------------------------------------------------------
+      - name: Node — install deps (npm install)
+        run: cd bindings/node && npm install --no-audit --no-fund
+
+      - name: Node pack (local, dry-run)
+        run: |
+          cd bindings/node && npm run build
+          OUT=$(npm pack --dry-run 2>&1)
+          echo "$OUT" | tee /tmp/npm.out
+          echo "$OUT" | grep -q index.mjs
+          echo "$OUT" | grep -q index.d.ts
+          echo "$OUT" | grep -q ".node"
+          echo "$OUT" | grep -q README.md
+          echo "$OUT" | grep -q LICENSE
+          ! echo "$OUT" | grep -q "test/"
+          ! echo "$OUT" | grep -q "src/lib.rs"
+          echo NODE_PACK_OK
+
+      # ------------------------------------------------------------------
+      # Step 4: Python wheel (dry-run) — mirrors python-pack gate exactly.
+      # uv run maturin build --release produces a manylinux wheel in target/wheels/.
+      # Asserts: wheel contains a .so extension module + py.typed marker.
+      # ------------------------------------------------------------------
+      - name: Python wheel (local, maturin build --release)
+        run: |
+          rm -f target/wheels/snapdir-*.whl 2>/dev/null || true
+          cd bindings/python && uv run maturin build --release
+          W=$(ls "$GITHUB_WORKSPACE/target/wheels/snapdir-"*manylinux*.whl 2>/dev/null | head -1)
+          [ -n "$W" ] || { echo "ERROR: no manylinux wheel produced"; exit 1; }
+          python3 -c "
+          import zipfile, sys
+          n = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(x.endswith(chr(46) + chr(115) + chr(111)) for x in n), 'missing .so: ' + str(n)
+          assert any(x.endswith('py.typed') for x in n), 'missing py.typed: ' + str(n)
+          print('wheel contents OK:', sys.argv[1])
+          " "$W"
+          echo PY_PACK_OK
+
+      # ------------------------------------------------------------------
+      # Step 5: Go pack (dry-run) — mirrors go-pack gate exactly.
+      # CGo env: CGO_ENABLED=1 GOARCH=arm64 CC=gcc GOFLAGS=-buildvcs=false.
+      # Vendors ffi staticlib + header, then go vet + go build + module path check.
+      # ------------------------------------------------------------------
+      - name: Go pack (local, go build + module check)
+        env:
+          CGO_ENABLED: "1"
+          GOARCH: arm64
+          CC: gcc
+          GOFLAGS: -buildvcs=false
+        run: |
+          mkdir -p bindings/go/lib bindings/go/include
+          cp -f include/snapdir.h bindings/go/include/
+          cp -f target/release/libsnapdir_ffi.a bindings/go/lib/
+          test -f bindings/go/lib/libsnapdir_ffi.a
+          test -f bindings/go/README.md
+          test -f bindings/go/LICENSE
+          cd bindings/go
+          go vet ./...
+          go build ./...
+          M=$(go list -m)
+          [ "$M" = "github.com/snapdir/snapdir/bindings/go" ]
+          echo GO_PACK_OK
+
+      # ------------------------------------------------------------------
+      # Step 6: C++ pack (dry-run) — mirrors cpp-pack gate exactly.
+      # Vendors ffi staticlib + header, runs `make install PREFIX=/tmp/sd`,
+      # asserts snapdir.hpp + snapdir.h + libsnapdir_ffi.a + snapdir.pc installed,
+      # pkg-config resolves, README.md + LICENSE present.
+      # BUILD-TOOL: native arm64 clang++/g++ + Makefile (no cmake in image).
+      # ------------------------------------------------------------------
+      - name: C++ pack (local, make install PREFIX=/tmp/sd)
+        run: |
+          mkdir -p bindings/cpp/lib bindings/cpp/include
+          cp -f target/release/libsnapdir_ffi.a bindings/cpp/lib/
+          cp -f include/snapdir.h bindings/cpp/include/
+          rm -rf /tmp/sd
+          make -C bindings/cpp install PREFIX=/tmp/sd
+          test -f /tmp/sd/include/snapdir.hpp
+          test -f /tmp/sd/include/snapdir.h
+          test -f /tmp/sd/lib/libsnapdir_ffi.a
+          test -f /tmp/sd/lib/pkgconfig/snapdir.pc
+          PKG_CONFIG_PATH=/tmp/sd/lib/pkgconfig pkg-config --exists snapdir
+          echo "cflags: $(PKG_CONFIG_PATH=/tmp/sd/lib/pkgconfig pkg-config --cflags --libs snapdir)"
+          test -f bindings/cpp/README.md
+          test -f bindings/cpp/LICENSE
+          echo CPP_PACK_OK
+
+      # ------------------------------------------------------------------
+      # Step 7: Zig pack (dry-run) — mirrors zig-pack gate exactly.
+      # Vendors ffi staticlib + header, `zig build` compiles the library, then
+      # `zig fetch bindings/zig` copies into the global cache and prints a
+      # reproducible content hash (1220<sha256 hex>).
+      # NOTE: zig is amd64-emulated under qemu — expect ~8-10 min; do not abort.
+      # ------------------------------------------------------------------
+      - name: Zig pack (local, zig build + zig fetch hash)
+        run: |
+          mkdir -p bindings/zig/lib bindings/zig/include
+          cp -f include/snapdir.h bindings/zig/include/
+          cp -f target/release/libsnapdir_ffi.a bindings/zig/lib/
+          cd bindings/zig && zig build
+          H=$(zig fetch "$GITHUB_WORKSPACE/bindings/zig" 2>&1)
+          echo "pkg hash: $H"
+          printf "%s" "$H" | grep -qE "^1220[0-9a-f]{60,}"
+          test -f "$GITHUB_WORKSPACE/bindings/zig/README.md"
+          test -f "$GITHUB_WORKSPACE/bindings/zig/LICENSE"
+          echo ZIG_PACK_OK
+
+      # ------------------------------------------------------------------
+      # Step 8: Java jar (dry-run) — mirrors java-pack gate exactly.
+      # Vendors ffi cdylib (.so), builds snapdir.jar via javac+jar (no gradle/maven
+      # in image — JDK-17 Foreign Function API, jdk.incubator.foreign).
+      # Asserts jar contains Snapdir.class + GraalVM configs + native lib.
+      # PackSmoke: Snapdir.version() via the packaged jar must return 1.10.0.
+      # Java is native arm64 (fast — no qemu emulation).
+      # ------------------------------------------------------------------
+      - name: Java jar (local, jar cfm + PackSmoke)
+        run: |
+          mkdir -p bindings/java/src/main/resources/native/linux-aarch64
+          cp -f target/release/libsnapdir_ffi.so bindings/java/src/main/resources/native/linux-aarch64/
+          cd bindings/java
+          rm -rf build && mkdir -p build/classes build/libs
+          javac --release 17 --add-modules jdk.incubator.foreign \
+            -d build/classes \
+            $(find src/main/java -name "*.java")
+          cp -r src/main/resources/. build/classes/
+          printf "Automatic-Module-Name: io.snapdir\nImplementation-Title: snapdir\n" > build/mf.txt
+          jar cfm build/libs/snapdir.jar build/mf.txt -C build/classes .
+          jar tf build/libs/snapdir.jar > build/contents.txt
+          grep -q "io/snapdir/Snapdir.class" build/contents.txt
+          grep -q "META-INF/native-image/io.snapdir/snapdir/reflect-config.json" build/contents.txt
+          grep -q "META-INF/native-image/io.snapdir/snapdir/resource-config.json" build/contents.txt
+          grep -qE "native/linux-aarch64/libsnapdir_ffi.so" build/contents.txt
+          printf "public class PackSmoke{public static void main(String[] a)throws Exception{System.out.println(io.snapdir.Snapdir.version());}}" > build/PackSmoke.java
+          javac --release 17 --add-modules jdk.incubator.foreign \
+            -cp build/libs/snapdir.jar \
+            -d build \
+            build/PackSmoke.java
+          v=$(java --add-modules jdk.incubator.foreign \
+               --enable-native-access=ALL-UNNAMED \
+               -cp "build/libs/snapdir.jar:build" \
+               PackSmoke)
+          echo "VERSION=$v"
+          test "$v" = "1.10.0"
+          ls -l build/libs/*.jar
+          echo JAVA_PACK_OK
+
+      # ------------------------------------------------------------------
+      # Step 9: Collect release artifacts (best-effort).
+      # Copies .crate/.tgz/.whl/.jar to /tmp/release-artifacts/.
+      # 2>/dev/null: missing artifacts (e.g. no .tgz from --dry-run npm pack)
+      # are silently skipped. RELEASE_DRYRUN_OK is the unconditional success marker.
+      # ------------------------------------------------------------------
+      - name: Collect release artifacts
+        run: |
+          mkdir -p /tmp/release-artifacts
+          cp target/package/*.crate /tmp/release-artifacts/ 2>/dev/null || true
+          cp bindings/node/*.tgz /tmp/release-artifacts/ 2>/dev/null || true
+          cp target/wheels/*.whl /tmp/release-artifacts/ 2>/dev/null || true
+          cp bindings/java/build/libs/*.jar /tmp/release-artifacts/ 2>/dev/null || true
+          ls -l /tmp/release-artifacts
+          echo RELEASE_DRYRUN_OK
+
+  # --------------------------------------------------------------------------
+  # deferred-publish: real registry pushes, GPG/OSSRH signing, and cross-OS/arch
+  # prebuild matrices. Intentionally disabled (if: false) — act is linux/arm64-only
+  # and publishing infrastructure (secrets, signing keys, cross-runners) is not
+  # wired. Remove `if: false` and implement when GH credits are restored and the
+  # full release infrastructure is available.
+  #
+  # DEFERRED:
+  #   - npm publish (@snapdir/snapdir) + 6-target prebuild matrix
+  #     (linux-x64/arm64/musl, darwin-x64/arm64, win32-x64-msvc)
+  #   - maturin publish to PyPI + 5-wheel matrix
+  #     (manylinux-x86_64/aarch64, musllinux-x86_64/aarch64, macos-universal2)
+  #   - Maven Central publish (signed jars, pom.xml, OSSRH/Central Portal upload)
+  #     + SpotBugs/ErrorProne/Kotlin interop quality + cross-OS native matrix
+  #   - cargo publish (snapdir-api, snapdir-ffi) to crates.io
+  #   - go-tag + github.com/snapdir/go-snapdir mirror + per-GOOS/GOARCH prebuilt libs
+  #   - GPG/OSSRH signing for Maven artifacts
+  # --------------------------------------------------------------------------
+  deferred-publish:
+    name: Registry publishes + cross-OS/arch + signing (deferred)
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: npm publish (deferred)
+        run: echo "npm publish @snapdir/snapdir + 6-target prebuild matrix — deferred to credited release CI (no registry credentials; act is linux/arm64-only)."
+      - name: maturin publish to PyPI (deferred)
+        run: echo "maturin publish + 5-wheel matrix (manylinux/musllinux/macos) — deferred to credited release CI."
+      - name: Maven Central publish (deferred)
+        run: echo "Maven Central (signed jars + pom.xml + OSSRH/Central Portal) + SpotBugs/ErrorProne/Kotlin + cross-OS matrix — deferred to credited release CI."
+      - name: cargo publish (deferred)
+        run: echo "cargo publish snapdir-api + snapdir-ffi to crates.io — deferred to credited release CI."
+      - name: Go module tag + mirror (deferred)
+        run: echo "go-tag + github.com/snapdir/go-snapdir mirror + per-GOOS/GOARCH prebuilt libs — deferred to credited release CI."
+      - name: GPG/OSSRH signing (deferred)
+        run: echo "GPG signing for Maven artifacts — deferred to credited release CI (no signing keys wired)."

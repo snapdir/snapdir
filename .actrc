@@ -1,0 +1,5 @@
+-P ubuntu-latest=snapdir-bindings:dev
+-P ubuntu-22.04=snapdir-bindings:dev
+-P ubuntu-24.04=snapdir-bindings:dev
+--pull=false
+--container-architecture linux/arm64

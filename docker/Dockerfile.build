@@ -1,0 +1,178 @@
+# snapdir-bindings build/verify image
+#
+# Gate:   infra-toolchain-matrix (phase 33)
+# Tag:    snapdir-bindings:dev
+# Base:   rust:1.91-slim-bookworm — pins rustc 1.91.1 (MSRV), matching
+#         `rust-version = "1.91.1"` in the workspace Cargo.toml.  The same
+#         tag is used by benches/run-iai-docker.sh so CI instruction-counts
+#         are host-independent.  Do NOT change this tag without a matching
+#         Cargo.toml rust-version bump (gate-approved change).
+#
+# LAYERING GUIDE — later infra gates add on top of this base:
+#   infra-snapdir-oracle    → COPY the pinned snapdir 1.10.0 oracle binary
+#   infra-uv-baseline       → COPY tools/pyproject.toml tools/uv.lock; uv sync
+#   infra-parity-sidecars   → minio + sshd service entries
+#
+# Do NOT float tags or digests — every version bump is a gate-approved change.
+# The image digest is frozen at infra-image-reproducible into
+# .gatesmith/build-image.sha.lock.
+
+FROM rust:1.91-slim-bookworm
+
+# ── Metadata ──────────────────────────────────────────────────────────────────
+LABEL org.opencontainers.image.title="snapdir-bindings" \
+      org.opencontainers.image.description="Pinned build/verify image for snapdir multi-language bindings (Phases 33-43)" \
+      org.opencontainers.image.source="https://github.com/snapdir/snapdir"
+
+# ── Version pins (single source of truth) ─────────────────────────────────────
+ENV GO_VERSION=1.24.4 \
+    ZIG_VERSION=0.13.0 \
+    UV_VERSION=0.7.12 \
+    CBINDGEN_VERSION=0.28.0 \
+    NODE_MAJOR=20
+
+# ── Layer 1: apt baseline (cheap, cached early) ───────────────────────────────
+# Includes: build-essential, clang/llvm, valgrind, pkg-config, Java JDK,
+# curl/gnupg for subsequent installers, and ca-certificates.
+# sudo is included so the non-root builder user can run sshd privilege-separation
+# setup (mkdir /run/sshd) without needing a full root shell.
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        git \
+        build-essential \
+        pkg-config \
+        clang \
+        llvm \
+        libclang-rt-14-dev \
+        valgrind \
+        openjdk-17-jdk-headless \
+        sudo \
+        && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Layer 2: Node.js 20.x (NodeSource pinned major) ──────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update -qq && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Layer 3: Go (pinned tarball) ──────────────────────────────────────────────
+RUN curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz" \
+        -o /tmp/go.tar.gz && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# ── Layer 4: Zig (pinned tarball) ─────────────────────────────────────────────
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+        -o /tmp/zig.tar.xz && \
+    tar -C /usr/local -xJf /tmp/zig.tar.xz && \
+    rm /tmp/zig.tar.xz && \
+    ln -sf "/usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
+
+# ── Layer 5: uv (pinned installer) ────────────────────────────────────────────
+# Installed to /usr/local/bin so it is on the default PATH for sh -lc.
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+        | UV_INSTALL_DIR=/usr/local/bin sh
+
+# ── Layer 6: cbindgen (slowest — compiles from source; kept last for cache) ───
+RUN cargo install cbindgen --version "=${CBINDGEN_VERSION}" --locked && \
+    cp "$CARGO_HOME/bin/cbindgen" /usr/local/bin/cbindgen
+
+# ── Layer 7: clippy + rustfmt components for the 1.91.1 toolchain ────────────
+# rust:1.91-slim-bookworm ships rustup + rustc/cargo but does NOT include
+# clippy or rustfmt by default.  Add them here as root (before USER builder)
+# so they install into the shared CARGO_HOME toolchain directory.
+# RUSTUP_HOME and CARGO_HOME are already set by the base image.
+# We invoke rustup by full path because $CARGO_HOME/bin is not yet on PATH
+# for the build shell (the next layer wires the symlinks).
+RUN RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
+        /usr/local/cargo/bin/rustup component add clippy rustfmt
+
+# ── Layer 8: symlinks so every tool resolves under sh -lc (no profile needed) ──
+# sh -l resets PATH to /usr/local/{s,}bin:/usr/{s,}bin:/s?bin — the Docker
+# ENV PATH entries are dropped. Symlink rust toolchain and go into /usr/local/bin.
+# Also symlink cargo-clippy/clippy-driver/cargo-fmt/rustfmt so `sh -lc` can
+# resolve them without needing $CARGO_HOME/bin on PATH.
+RUN ln -sf "$CARGO_HOME/bin/rustc"         /usr/local/bin/rustc         && \
+    ln -sf "$CARGO_HOME/bin/cargo"         /usr/local/bin/cargo         && \
+    ln -sf "$CARGO_HOME/bin/cargo-clippy"  /usr/local/bin/cargo-clippy  && \
+    ln -sf "$CARGO_HOME/bin/clippy-driver" /usr/local/bin/clippy-driver && \
+    ln -sf "$CARGO_HOME/bin/cargo-fmt"     /usr/local/bin/cargo-fmt     && \
+    ln -sf "$CARGO_HOME/bin/rustfmt"       /usr/local/bin/rustfmt       && \
+    ln -sf /usr/local/go/bin/go            /usr/local/bin/go
+
+# ── Layer 9: parity sidecars (minio + sshd) ──────────────────────────────────
+# infra-parity-sidecars gate (phase 33).
+#
+# MinIO pin: RELEASE.2024-11-07T00-52-20Z (linux-arm64)
+#   Download URL: https://dl.min.io/server/minio/release/linux-arm64/archive/
+#                 minio.RELEASE.2024-11-07T00-52-20Z
+#   → redirects to GitHub release asset (minio.linux-arm64.RELEASE.*)
+#
+# Test credentials (loopback-only, non-secret):
+#   MINIO_ROOT_USER:     snapdir-test
+#   MINIO_ROOT_PASSWORD: snapdir-test-secret
+#   MinIO API port:      9000
+#   sshd port:           2222
+#   SSH key:             /workspace/scripts/sidecar_ssh_key (ed25519, no passphrase)
+#   SSH known_hosts:     /workspace/scripts/sidecar_known_hosts
+ENV MINIO_RELEASE=RELEASE.2024-11-07T00-52-20Z
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        openssh-server \
+        netcat-openbsd \
+    && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL \
+        "https://github.com/minio/minio/releases/download/${MINIO_RELEASE}/minio.linux-arm64.${MINIO_RELEASE}" \
+        -o /usr/local/bin/minio && \
+    chmod +x /usr/local/bin/minio && \
+    minio --version
+
+# ── Layer 10: bake sidecar scripts into the image ────────────────────────────
+# Build context is docker/, so COPY source is relative to docker/.
+# Scripts land at /workspace/scripts/ and are executable.
+# The P36 harness sources /workspace/scripts/sidecars.env for ports/creds.
+COPY scripts/ /workspace/scripts/
+RUN chmod +x /workspace/scripts/*.sh
+
+# ── Layer 11: non-root user (infra-image-nonroot, phase 33) ──────────────────
+# Create a fixed-uid builder user so that `cargo test --workspace` runs non-root
+# inside the container.  This matches CI (ubuntu runner = non-root) and allows
+# the ≥2 pre-existing tests that assert non-root 0444/umask semantics to pass:
+#   • crates/snapdir-cli/tests/mirror_durability.rs  — write-through 0444 MUST fail
+#   • crates/snapdir-ssh-store/tests/fake_ssh_roundtrip.rs — umask discipline
+#
+# All heavy installs (apt, toolchain downloads, cargo install) run above as ROOT
+# and complete before this USER switch.
+#
+# CARGO_HOME writability: rust:* images set CARGO_HOME=/usr/local/cargo (root-owned).
+# We chown the whole tree to builder so `cargo` can write the registry cache when
+# building/testing.  /usr/local/rustup (if present) is chowned too.
+#
+# sudo: builder gets passwordless sudo so sidecars-up.sh can run the sshd
+# privilege-separation setup (mkdir /run/sshd) without a full root shell.
+RUN useradd --uid 1000 --create-home --shell /bin/bash builder && \
+    chown -R builder:builder /usr/local/cargo && \
+    if [ -d /usr/local/rustup ]; then chown -R builder:builder /usr/local/rustup; fi && \
+    chown -R builder:builder /workspace && \
+    echo "builder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/builder && \
+    chmod 0440 /etc/sudoers.d/builder
+
+USER builder
+
+# ── Working directory ─────────────────────────────────────────────────────────
+WORKDIR /workspace
+
+# ── Default command ───────────────────────────────────────────────────────────
+# Overridden by each binding gate's entrypoint.
+CMD ["rustc", "--version"]

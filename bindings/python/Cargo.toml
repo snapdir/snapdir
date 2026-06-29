@@ -1,0 +1,24 @@
+[package]
+name = "snapdir-python"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91.1"
+authors = ["Bermi Ferrer <bermi@bermilabs.com>"]
+license = "MIT"
+repository = "https://github.com/snapdir/snapdir"
+homepage = "https://snapdir.org"
+description = "snapdir-python: PyO3/maturin binding for the snapdir-api facade."
+publish = false
+
+[lib]
+name = "snapdir"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+snapdir-api = { path = "../../crates/snapdir-api", version = "1.11.0" }
+
+[lints]
+workspace = true

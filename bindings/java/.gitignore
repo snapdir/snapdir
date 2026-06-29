@@ -1,0 +1,11 @@
+build/
+.gradle/
+out/
+
+# Native cdylib artefacts — vendored outside git; provided by CI
+src/main/resources/native/**/*.so
+src/main/resources/native/**/*.dylib
+src/main/resources/native/**/*.dll
+
+# Extracted temp files and local caches
+*.class

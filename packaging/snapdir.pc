@@ -1,0 +1,26 @@
+# snapdir.pc — pkg-config metadata for the snapdir C ABI (snapdir-ffi).
+#
+# Install layout:
+#   ${libdir}/libsnapdir_ffi.so   (cdylib, dynamic)
+#   ${libdir}/libsnapdir_ffi.a    (staticlib, for static linking)
+#   ${includedir}/snapdir.h       (generated C99 header via cbindgen)
+#
+# During development the build artifacts live at:
+#   target/<profile>/libsnapdir_ffi.{so,dylib,a}   (built by cargo)
+#   include/snapdir.h                                (repo root)
+#
+# Override prefix at query time:
+#   PKG_CONFIG_PATH=packaging pkg-config --define-variable=prefix=$PWD snapdir
+
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: snapdir
+Description: snapdir content-addressed snapshot/transfer C ABI
+URL: https://snapdir.org
+Version: 1.10.0
+Cflags: -I${includedir}
+Libs: -L${libdir} -lsnapdir_ffi
+Libs.private: -lpthread -ldl -lm

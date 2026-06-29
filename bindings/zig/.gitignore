@@ -1,0 +1,7 @@
+# Vendored build artifacts (produced by the verification step; not committed)
+lib/
+include/snapdir.h
+
+# Zig build output
+zig-out/
+.zig-cache/

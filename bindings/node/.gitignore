@@ -1,0 +1,6 @@
+node_modules/
+*.node
+target/
+index.js
+index.mjs
+index.d.ts

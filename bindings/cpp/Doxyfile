@@ -1,0 +1,68 @@
+# Doxyfile — Doxygen configuration for the snapdir C++ binding.
+#
+# Run: doxygen Doxyfile
+# Output: docs/html/
+#
+# The offline CI image does not include doxygen, so this file is present for
+# credited CI and local developer use only. The PM gate uses
+# .gatesmith/scripts/check_cpp_docs.py as the objective coverage checker.
+
+#---------------------------------------------------------------------------
+# Project identity
+#---------------------------------------------------------------------------
+PROJECT_NAME           = "snapdir C++ binding"
+PROJECT_NUMBER         = ""
+PROJECT_BRIEF          = "Header-only C++17 RAII wrapper over the snapdir-ffi C ABI"
+OUTPUT_DIRECTORY       = docs/html
+
+#---------------------------------------------------------------------------
+# Input
+#---------------------------------------------------------------------------
+INPUT                  = include
+FILE_PATTERNS          = *.hpp *.h
+RECURSIVE              = NO
+
+# Include the C ABI header for cross-reference links but coverage is checked
+# only against snapdir.hpp (the C header is frozen cbindgen output).
+INCLUDE_FILE_PATTERNS  = *.h
+
+#---------------------------------------------------------------------------
+# Extraction and warnings
+#---------------------------------------------------------------------------
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+WARN_IF_UNDOCUMENTED   = YES
+WARN_NO_PARAMDOC       = YES
+WARN_AS_ERROR          = NO
+
+#---------------------------------------------------------------------------
+# Build options
+#---------------------------------------------------------------------------
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_RTF           = NO
+GENERATE_XML           = NO
+
+#---------------------------------------------------------------------------
+# C++ language options
+#---------------------------------------------------------------------------
+LANGUAGE_MAPPING       =
+EXTENSION_MAPPING      =
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+EXPAND_ONLY_PREDEF     = NO
+
+# Suppress the detail:: internal namespace from the public docs.
+EXCLUDE_SYMBOLS        = snapdir::detail::*
+
+#---------------------------------------------------------------------------
+# Output appearance
+#---------------------------------------------------------------------------
+QUIET                  = NO
+WARNINGS               = YES
+ALPHABETICAL_INDEX     = YES
+GENERATE_TREEVIEW      = YES

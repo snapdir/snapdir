@@ -1,0 +1,26 @@
+[package]
+name = "snapdir-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "snapdir-ffi: C ABI (cdylib + staticlib) for the snapdir language bindings."
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+snapdir-api = { path = "../snapdir-api", version = "1.11.0" }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+libc = "0.2"
+serde_json = "1"
+
+[build-dependencies]
+cbindgen = "0.28"
+
+[lints]
+workspace = true
