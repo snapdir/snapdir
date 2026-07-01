@@ -30,6 +30,12 @@
 //! variant *construction syntax* (field shapes are impl-private and `#[non_exhaustive]`),
 //! pinning the observable CONTRACT (`code()`, `source()`, `Display`, trait bounds) instead.
 
+#![allow(
+    clippy::doc_overindented_list_items,
+    clippy::doc_markdown,
+    clippy::default_trait_access
+)]
+
 use std::path::Path;
 
 use snapdir_api::{SnapdirError, SnapshotId, StoreUri};

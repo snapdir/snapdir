@@ -6,6 +6,8 @@
 // re-manifests to a DIFFERENT snapshot id (perms are part of the manifest text
 // the id hashes).  With the fix the re-id matches the pushed id.
 
+#![allow(clippy::doc_markdown)]
+
 use std::os::unix::fs::PermissionsExt;
 
 use snapdir_api::{

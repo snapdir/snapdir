@@ -31,6 +31,14 @@
 // ADD `time`). No `futures` crate is required — concurrency uses `tokio::spawn`
 // / `tokio::join!` only.
 
+#![allow(
+    clippy::similar_names,
+    clippy::doc_markdown,
+    clippy::redundant_locals,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements
+)]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

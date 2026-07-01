@@ -9,6 +9,8 @@
 //! - No-collision diffs (single store per side, or same-content multi-store)
 //!   are behaviour-identical to before.
 
+#![allow(clippy::doc_markdown, clippy::cmp_owned)]
+
 use std::path::PathBuf;
 
 use snapdir_api::{ConflictPolicy, DiffOptions, DiffStatus, SnapdirError, StageOptions, StoreUri};

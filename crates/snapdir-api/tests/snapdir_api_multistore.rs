@@ -24,6 +24,12 @@
 //! it is meaningful only when the sidecar is up. The *local-disk-leak* checks
 //! (the core bug discriminator) need NO sidecar and run everywhere.
 
+#![allow(
+    clippy::needless_raw_string_hashes,
+    clippy::doc_markdown,
+    clippy::map_unwrap_or
+)]
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 

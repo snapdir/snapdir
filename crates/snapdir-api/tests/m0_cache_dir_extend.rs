@@ -4,6 +4,8 @@
 //! `VerifyCacheOptions::cache_dir`, and `CacheOptions::cache_dir` are actually
 //! honoured by `stage()`, `verify_cache()`, and `flush_cache()`.
 
+#![allow(clippy::needless_update, clippy::used_underscore_binding)]
+
 use snapdir_api::{CacheOptions, StageOptions, VerifyCacheOptions, VerifyCacheResult};
 use std::path::PathBuf;
 

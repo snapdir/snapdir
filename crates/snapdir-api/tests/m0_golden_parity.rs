@@ -41,7 +41,9 @@
     clippy::doc_markdown,
     clippy::missing_panics_doc,
     clippy::unreadable_literal,
-    clippy::case_sensitive_file_extension_comparisons
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::unnecessary_to_owned,
+    clippy::trivially_copy_pass_by_ref
 )]
 
 use std::collections::BTreeSet;

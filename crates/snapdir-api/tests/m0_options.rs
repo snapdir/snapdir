@@ -26,6 +26,13 @@
 //
 // Every test carries a one-line `//` comment naming the §5 field-family / §2 decision it pins.
 
+#![allow(
+    clippy::needless_update,
+    clippy::default_trait_access,
+    clippy::used_underscore_binding,
+    clippy::field_reassign_with_default
+)]
+
 use std::path::PathBuf;
 
 use snapdir_api::{

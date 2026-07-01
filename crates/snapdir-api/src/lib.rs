@@ -11,6 +11,17 @@
 //! No `anyhow` leaks into the public surface.
 
 #![deny(missing_docs)]
+// Stable clippy 1.96 introduces several new lints not yet fired by MSRV
+// (1.91.1).  Suppress here until each underlying fix lands:
+//   • used_underscore_binding  — `_o`-prefixed option params on async transfer
+//     fns (push/pull/sync) that aren't fully wired yet (cache_dir threading).
+//   • manual_let_else          — `match … { Ok(v) => v, Err(_) => continue }`
+//     patterns; semantically equivalent, real rewrite is deferred.
+//   • doc_overindented_list_items — continuation lines in doc-comment lists
+//     that clippy 1.96 considers over-indented; visual alignment is deferred.
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::doc_overindented_list_items)]
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

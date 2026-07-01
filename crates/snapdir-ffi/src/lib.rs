@@ -50,6 +50,17 @@
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
+// Style lints that fire on stable clippy 1.96 but are not genuine correctness
+// issues in this FFI crate. Listed explicitly rather than a blanket allow so
+// that genuinely new warning categories still surface.
+#![allow(clippy::single_match_else)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::io_other_error)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::manual_map)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::borrow_as_ptr)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -1977,7 +1988,7 @@ mod tests {
 
     #[test]
     fn snapdir_error_round_trip() {
-        use snapdir_api::{SnapdirError as ApiErr, SnapshotId};
+        use snapdir_api::SnapshotId;
         // Produce a real API error.
         let api_err = SnapshotId::from_hex("bad").unwrap_err();
         let ffi_err = Box::new(SnapdirError::from_api(&api_err));

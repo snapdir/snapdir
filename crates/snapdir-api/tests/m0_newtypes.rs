@@ -48,6 +48,13 @@
 //!       `m.entries`/`m.raw` as public fields. This file stays CONSISTENT with that
 //!       locked reading.
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::no_effect_underscore_binding,
+    clippy::default_trait_access,
+    clippy::format_collect
+)]
+
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

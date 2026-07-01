@@ -10,6 +10,13 @@
 //! surface. Deep behavior is covered by the async-facade and golden-parity clusters;
 //! these assertions are SURFACE + basic invariants, but never weaker than the spec.
 
+#![allow(
+    clippy::similar_names,
+    clippy::doc_markdown,
+    clippy::no_effect_underscore_binding,
+    clippy::clone_on_copy
+)]
+
 use std::path::{Path, PathBuf};
 
 use snapdir_api::{
