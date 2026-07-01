@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "snapdir"
+# Versioning policy (binding-versioning gate, Phase 43): bindings mirror the
+# snapdir-core they wrap. Core/CLI is 1.11.0, so this binding is 1.11.0.
+version = "1.11.0"
+requires-python = ">=3.10"
+description = "Python binding for snapdir — content-addressable directory snapshots."
+license = { text = "MIT" }
+readme = "README.md"
+
+[project.urls]
+Homepage = "https://snapdir.org"
+Repository = "https://github.com/snapdir/snapdir"
+Documentation = "https://snapdir.org/docs"
+
+[tool.maturin]
+features = ["pyo3/abi3-py310"]
+module-name = "snapdir"
+python-source = "python"
+
+[tool.uv]
+dev-dependencies = [
+    "maturin>=1.5,<2",
+    "mypy>=1.11",
+    "pyright>=1.1.380",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.mypy]
+mypy_path = "python"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["*.py"]

@@ -1,0 +1,3 @@
+lib/*.a
+lib/*.so
+include/snapdir.h

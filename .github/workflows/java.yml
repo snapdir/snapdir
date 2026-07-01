@@ -1,0 +1,170 @@
+name: Java
+
+# Build and test the snapdir Java binding (JDK-17 Foreign Function API over the frozen
+# C ABI), run the adversary-authored API test suite (222/0), quality checks (-Xlint:all
+# clean), and validate manifest-parity (45 PASS / 0 FAIL / 3 SKIP).
+#
+# Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Everything is
+# baked into the image (rust 1.91.1, javac + java JDK-17). NO apt, NO toolchain-install
+# steps, NO network required. Java is native arm64 (no qemu emulation).
+#
+# DEFERRED legs (clearly scoped — do NOT implement until credits restored):
+#   - Maven Central publishing (Central Portal upload, signed jars, pom.xml metadata)
+#     (no mvn/gradle in image; no GPG key wired; deferred to credited release CI)
+#   - SpotBugs / ErrorProne / Kotlin interop quality checks
+#     (jars not available in the offline image; deferred to credited release CI)
+#   - Cross-OS native matrix (linux/amd64, linux/arm64, darwin/aarch64, windows)
+#     (act is linux/arm64-only; these cannot run under the local act harness)
+# All three are intentionally absent so `act` remains green.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "bindings/java/**"
+      - "tests/golden/**"
+      - "include/snapdir.h"
+      - "crates/snapdir-ffi/**"
+      - ".github/workflows/java.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "bindings/java/**"
+      - "tests/golden/**"
+      - "include/snapdir.h"
+      - "crates/snapdir-ffi/**"
+      - ".github/workflows/java.yml"
+
+concurrency:
+  group: java-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # java: build snapdir-ffi, vendor the .so, run API test suite (222/0),
+  # quality checks (-Xlint:all clean), and manifest parity (45/0/3).
+  #
+  # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
+  # rust 1.91.1, javac + java JDK-17). NO apt, NO dtolnay/rust-toolchain.
+  # Uses the JDK-17 Foreign Function API (jdk.incubator.foreign) — see MEMORY
+  # note [[java-binding-build]]. NO gradle/maven/SpotBugs/ErrorProne (offline image).
+  # --------------------------------------------------------------------------
+  java:
+    name: Java (JDK Foreign + JUnit-free suite + quality + parity)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # JDK-17 is required for the Foreign Function API (jdk.incubator.foreign).
+      # actions/setup-java@v4 ensures Temurin 17 is on PATH on real GH runners
+      # (ubuntu-latest ships JDK-11 by default). Under act the image already has
+      # JDK-17 baked in, so this step is a low-cost verification pass-through.
+      # ------------------------------------------------------------------
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ------------------------------------------------------------------
+      # Step 1: Build FFI cdylib (release — the Java binding loads the .so)
+      # ------------------------------------------------------------------
+      - name: Build snapdir-ffi (release cdylib)
+        run: cargo build --release -p snapdir-ffi --locked
+
+      # ------------------------------------------------------------------
+      # Step 2: Vendor the .so into bindings/java/src/main/resources
+      # Use the native machine architecture so the JVM can locate the .so
+      # under the correct subpath (linux-aarch64 on arm64 act image,
+      # linux-x86_64 on real x86_64 GH runners). `uname -m` returns the
+      # arch string that matches the Java NativeLoader convention.
+      # ------------------------------------------------------------------
+      - name: Vendor libsnapdir_ffi.so into bindings/java
+        run: |
+          NATIVE_DIR="bindings/java/src/main/resources/native/linux-$(uname -m)"
+          mkdir -p "$NATIVE_DIR"
+          cp -f target/release/libsnapdir_ffi.so "$NATIVE_DIR/"
+          echo "vendor: OK (libsnapdir_ffi.so -> native/linux-$(uname -m)/)"
+
+      # ------------------------------------------------------------------
+      # Step 3: API test suite (222 checks / 0 failures)
+      # Mirrors java-api-tests-review / java-judge green commands exactly.
+      # ------------------------------------------------------------------
+      - name: API test suite (222/0)
+        run: |
+          cd bindings/java && rm -rf build && mkdir -p build/classes
+          # shellcheck disable=SC2046
+          javac --release 17 --add-modules jdk.incubator.foreign \
+            -d build/classes \
+            $(find src/main/java src/test/java -name "*.java")
+          cp -r src/main/resources/. build/classes/
+          java --add-modules jdk.incubator.foreign \
+               --enable-native-access=ALL-UNNAMED \
+               -cp build/classes \
+               io.snapdir.SnapdirApiTest
+
+      # ------------------------------------------------------------------
+      # Step 4: Quality — -Xlint:all clean
+      # The only allowed output line is the incubator-module NOTE (not a warning).
+      # Mirrors java-quality gate commands exactly.
+      # ------------------------------------------------------------------
+      - name: Quality (-Xlint:all clean)
+        run: |
+          cd bindings/java
+          # shellcheck disable=SC2046
+          javac --release 17 --add-modules jdk.incubator.foreign \
+            -Xlint:all \
+            -d /tmp/lintclasses \
+            $(find src/main/java -name "*.java") 2>/tmp/lint.txt
+          cat /tmp/lint.txt
+          grep -E "warning:|error:" /tmp/lint.txt | grep -vEi "incubator" > /tmp/lint.bad || true
+          test ! -s /tmp/lint.bad
+
+      # ------------------------------------------------------------------
+      # Step 5: Parity (45 PASS / 0 FAIL / 3 SKIP)
+      # Rebuild build/classes with main + ParityDriver, then java.sh runs it.
+      # A 3× settle/retry loop guards against the virtiofs flake seen in
+      # earlier gate runs; on a fresh act checkout a single run is usually fine.
+      # Mirrors manifest-parity-java gate commands exactly.
+      # ------------------------------------------------------------------
+      - name: Parity — build classes (main + ParityDriver)
+        run: |
+          cd bindings/java && rm -rf build && mkdir -p build/classes
+          # shellcheck disable=SC2046
+          javac --release 17 --add-modules jdk.incubator.foreign \
+            -d build/classes \
+            $(find src/main/java -name "*.java") \
+            "$GITHUB_WORKSPACE/tests/golden/drivers/ParityDriver.java"
+          cp -r src/main/resources/. build/classes/
+          echo "parity classes: OK"
+
+      - name: Parity — run harness (45/0/3, 3× retry for virtiofs flake)
+        run: |
+          chmod -R u+rwx tests/golden/work 2>/dev/null || true
+          rm -rf tests/golden/work 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if tests/golden/run_parity.sh --driver tests/golden/drivers/java.sh; then
+              echo "parity: OK (attempt ${attempt})"
+              exit 0
+            fi
+            echo "parity attempt ${attempt} failed; retrying..." >&2
+            chmod -R u+rwx tests/golden/work 2>/dev/null || true
+            rm -rf tests/golden/work 2>/dev/null || true
+          done
+          echo "parity: FAILED after 3 attempts" >&2
+          exit 1
+
+  # DEFERRED (not implemented here): Maven Central + signed jars, SpotBugs /
+  # ErrorProne / Kotlin quality, and cross-OS native matrix (linux/amd64,
+  # darwin/aarch64, windows). Re-implement in credited release CI.

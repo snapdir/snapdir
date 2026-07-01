@@ -428,8 +428,19 @@ fn adaptive_wire_on_path_respects_gate_limit() {
 /// i.e. our AIMD shrink in the throttle test is genuinely caused by the
 /// classified congestion signal, not by ticking alone. Uses the Mutex<usize>
 /// sink pattern to also confirm a rate applier is exercised on the live path.
+///
+/// All inputs are injected via `tick_with(now, cpu, rss)` — the same
+/// fully-injectable seam the sibling AIMD test uses — so the gate trajectory
+/// depends only on the injected ops + clock, never on `epoch.elapsed()` or
+/// real CPU/RSS sampling. Calm CPU (20 %) pins both load guardrails off;
+/// zero RSS disables the memory budget; `now` advances one second per tick.
 #[test]
 fn adaptive_wire_healthy_stream_does_not_spuriously_shrink() {
+    // Calm injected CPU + zero RSS: pins the load-dependent guardrails off so
+    // the gate trajectory depends only on the injected ops + clock.
+    const CALM_CPU: Option<f64> = Some(20.0);
+    const NO_RSS: Option<u64> = Some(0);
+
     let gate = AdaptiveGate::new(4, 32);
     let applied: Arc<Mutex<Option<Option<u64>>>> = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&applied);
@@ -438,12 +449,17 @@ fn adaptive_wire_healthy_stream_does_not_spuriously_shrink() {
     let policy = AdaptivePolicy::new(0.8, 32, u64::MAX, None);
     let driver = ControllerDriver::new(policy, gate.clone(), 4096, Some(rate_applier), None);
 
+    // Injected monotonic clock: advance one second per tick, deterministically.
+    let mut now = Duration::ZERO;
+    let step = Duration::from_secs(1);
+
     let seed = gate.limit();
     for _ in 0..8 {
         for _ in 0..4 {
             record_like_live(&driver, 2_000_000, &Ok(()));
         }
-        driver.tick();
+        driver.tick_with(now, CALM_CPU, NO_RSS);
+        now += step;
     }
     assert!(
         gate.limit() >= seed,

@@ -1,0 +1,9 @@
+{
+  "resources": {
+    "includes": [
+      {"pattern": "native/.*/libsnapdir_ffi\\.so"},
+      {"pattern": "native/.*/libsnapdir_ffi\\.dylib"},
+      {"pattern": "native/.*/snapdir_ffi\\.dll"}
+    ]
+  }
+}

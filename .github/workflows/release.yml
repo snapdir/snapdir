@@ -299,6 +299,27 @@ jobs:
   #      `release.yml`) so subsequent releases need no operator step.
   # (Precedent: the same bootstrap was done for snapdir-ssh-store at 1.5.0; TP
   # is now registered for all five previously-published crates.)
+  #
+  # *** RELEASE-TIME OPERATOR TODO (first release shipping `snapdir-api` and
+  # `snapdir-ffi`, i.e. v1.11.0) ***
+  # `snapdir-api` and `snapdir-ffi` are NEW crate names on crates.io at v1.11.0.
+  # TP tokens CANNOT create new crates, so their first publishes will 403 (the
+  # same failure mode as `snapdir` at 1.6.0 — no stored-token fallback here).
+  # Expected operator flow:
+  #   1. Let the loop publish the six existing crates (all skip-guarded /
+  #      TP-registered) and 403 on `snapdir-api` (or `snapdir-ffi`).
+  #   2. Publish manually with a scoped API token:
+  #        cargo publish -p snapdir-api --locked --no-verify
+  #        cargo publish -p snapdir-ffi --locked --no-verify
+  #      (snapdir-api MUST go first: snapdir-ffi declares
+  #       `snapdir-api = { path=..., version="1.11.0" }` and cargo resolves
+  #       that from the crates.io index at ffi's publish/verify time.)
+  #   3. Re-run this workflow — the idempotent skip-guard below skips every
+  #      already-published crate@version, so the re-run is safe and turns the
+  #      job green.
+  #   4. Register Trusted Publishing for both new crates (crate Settings ->
+  #      Trusted Publishing -> GitHub -> repo `snapdir/snapdir`, workflow
+  #      `release.yml`) so subsequent releases are hands-off.
   crates-io:
     name: Publish crates.io
     needs: release
@@ -339,13 +360,25 @@ jobs:
           # RELEASE-TIME OPERATOR TODO in the job header above: one manual
           # `cargo publish -p snapdir`, re-run this job (the skip-guard makes
           # the re-run safe), then register TP on the crate page. ***
+          # *** `snapdir-api` and `snapdir-ffi` are ALSO NEW at 1.11.0 — the
+          # same one-time bootstrap applies; see the second OPERATOR TODO block
+          # in the job header above. ***
           #
           # Ordering: snapdir-ssh-store's only runtime dep is snapdir-core, but
           # its dev-dep on snapdir-stores is recorded (with this version) in the
           # index metadata, so it publishes AFTER snapdir-stores. snapdir-cli
           # (the implementation library) consumes everything before it, and the
-          # `snapdir` bin shim depends on snapdir-cli — so `snapdir` goes LAST.
-          for crate in snapdir-core snapdir-catalog snapdir-stores snapdir-ssh-store snapdir-cli snapdir; do
+          # `snapdir` bin shim depends on snapdir-cli — so `snapdir` goes LAST
+          # of the original six. snapdir-api publishes after `snapdir` because
+          # its own deps (snapdir-core/-catalog/-stores) are already on the index
+          # by that point. snapdir-ffi publishes after snapdir-api because it
+          # declares `snapdir-api = { path=..., version="1.11.0" }` and cargo
+          # resolves that from the crates.io index at ffi's publish/verify time.
+          for crate in \
+            snapdir-core snapdir-catalog snapdir-stores \
+            snapdir-ssh-store snapdir-cli snapdir \
+            snapdir-api \
+            snapdir-ffi; do
             echo "::group::publish ${crate}"
             # Sparse-index shard for a crate name >= 4 chars: <c1c2>/<c3c4>/<name>.
             # All six snapdir crate names are >= 4 chars, so this is uniform.
@@ -364,3 +397,465 @@ jobs:
           done
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # ---------------------------------------------------------------------------
+  # 5. Pre-build the Node.js native addon for all 7 napi targets.
+  #    Runs on every trigger (tag push and dry-run) so the prebuilt .node
+  #    binaries are always smoke-tested alongside the Rust binary builds.
+  #    Native runners for macOS (x86_64 + aarch64) and Windows x86_64;
+  #    cargo-zigbuild cross-compile for the three Linux cross legs
+  #    (musl-x64, gnu-aarch64, musl-aarch64).
+  # ---------------------------------------------------------------------------
+  npm-build:
+    name: Node prebuild ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild (cross-compile legs)
+        if: matrix.cross
+        run: pip3 install ziglang && cargo install cargo-zigbuild --locked
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: npm-build-${{ matrix.target }}
+
+      - name: Install Node dependencies
+        working-directory: bindings/node
+        run: npm install --no-audit --no-fund
+
+      - name: Build native addon (native)
+        if: ${{ !matrix.cross }}
+        working-directory: bindings/node
+        run: npx napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Build native addon (cross-compile via zigbuild)
+        if: matrix.cross
+        working-directory: bindings/node
+        run: npx napi build --platform --release --target ${{ matrix.target }} --cross-compile
+
+      - name: Upload prebuilt .node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-binding-${{ matrix.target }}
+          path: bindings/node/*.node
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 6. Publish @snapdir/snapdir + 7 per-platform @snapdir/snapdir-<triple>
+  #    sub-packages to npm using OIDC provenance (npm trusted publishing).
+  #    Gated on a real `v*` tag push — same guard as `release` and `crates-io`.
+  #
+  #    BOOTSTRAP NOTE — @snapdir/* are NEW scoped packages on npmjs.com:
+  #    npm OIDC trusted-publishing must be configured on npmjs.com AFTER a
+  #    package first exists on the registry (TP tokens cannot create new
+  #    packages). Expected one-time operator flow for the initial publish:
+  #      1. Authenticate with `npm login` (or export NPM_TOKEN).
+  #      2. In bindings/node: run `napi create-npm-dirs` then `napi artifacts`
+  #         (point --artifacts-dir at pre-built .node files) to populate npm/.
+  #      3. `npm publish --access public` once for each dir under npm/ and
+  #         once for the main @snapdir/snapdir package.
+  #      4. On npmjs.com: package Settings → Publishing Access → configure
+  #         Trusted Publishing (GitHub Actions, repo snapdir/snapdir, workflow
+  #         release.yml) for @snapdir/snapdir AND each of the 7 platform
+  #         packages. Remove any NPM_TOKEN secret afterwards — subsequent
+  #         releases use the OIDC exchange below with no operator step needed.
+  #    The @snapdir org already exists on npmjs.com.
+  # ---------------------------------------------------------------------------
+  npm-publish:
+    name: Publish npm (@snapdir/snapdir)
+    needs: [release, npm-build]
+    # Publish ONLY on a real `v*` tag push; a workflow_dispatch dry-run stops here.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC for npm trusted publishing (--provenance)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node dependencies
+        working-directory: bindings/node
+        run: npm install --no-audit --no-fund
+
+      - name: Download all prebuilt .node artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-binding-*
+          merge-multiple: true
+          path: bindings/node/artifacts
+
+      - name: Generate per-platform npm packages
+        working-directory: bindings/node
+        run: |
+          set -euo pipefail
+          npx napi create-npm-dirs
+          npx napi artifacts --artifacts-dir artifacts
+
+      - name: Publish per-platform packages (@snapdir/snapdir-<triple>)
+        working-directory: bindings/node
+        run: |
+          set -euo pipefail
+          for pkg_dir in npm/*/; do
+            npm publish "${pkg_dir}" --provenance --access public
+          done
+
+      - name: Publish main package (@snapdir/snapdir)
+        working-directory: bindings/node
+        run: npm publish --provenance --access public
+
+  # ---------------------------------------------------------------------------
+  # 7. Pre-build Python wheels for all 5 distribution targets via
+  #    PyO3/maturin-action (provides manylinux/musllinux containers + zig
+  #    cross-compile for aarch64 legs). abi3-py310 → one wheel per platform
+  #    covers all Python 3.10+. Runs on every trigger so wheels are always
+  #    smoke-tested alongside the Rust binary builds.
+  # ---------------------------------------------------------------------------
+  python-build:
+    name: Python wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: manylinux2014
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: manylinux2014
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: musllinux_1_2
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: musllinux_1_2
+          - os: macos-14
+            target: universal2-apple-darwin
+            manylinux: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: bindings/python
+          args: --release --locked --out dist
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-${{ matrix.target }}-${{ matrix.manylinux || 'macos' }}
+          path: bindings/python/dist/*.whl
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 8. Build the Python sdist (source distribution) — one per release.
+  # ---------------------------------------------------------------------------
+  python-sdist:
+    name: Python sdist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          working-directory: bindings/python
+          args: --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: bindings/python/dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 9. Publish `snapdir` to PyPI using Trusted Publishing (OIDC — no stored
+  #    token). The PyPI pending-publisher is pre-authorized for project
+  #    `snapdir` (repo snapdir/snapdir, workflow release.yml), so the very
+  #    first tag publish succeeds without a manual bootstrap step (unlike
+  #    npm/@snapdir and crates.io which required a one-time stored-token
+  #    publish). Trusted Publish via OIDC: permissions.id-token: write is
+  #    the sole credential — no NPM_TOKEN / CARGO_REGISTRY_TOKEN analogue.
+  #    Gated on a real `v*` tag push — same guard as `release` and `crates-io`.
+  # ---------------------------------------------------------------------------
+  pypi-publish:
+    name: Publish PyPI (snapdir)
+    needs: [release, python-build, python-sdist]
+    # Publish ONLY on a real `v*` tag push; a workflow_dispatch dry-run stops here.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/snapdir
+    permissions:
+      contents: read
+      id-token: write   # OIDC for PyPI Trusted Publishing (no stored token)
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: dist
+
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ---------------------------------------------------------------------------
+  # 10. Pre-build the libsnapdir_ffi cdylib for 5 OS/arch targets needed by the
+  #     Java binding (org.snapdir:snapdir). NativeLoader.java embeds the lib at
+  #     /native/<os>-<arch>/libsnapdir_ffi.<ext> inside the JAR.
+  #     Linux x86_64: native; Linux aarch64: cargo-zigbuild cross-compile;
+  #     macOS x86_64 + aarch64: native runners; Windows x86_64: native.
+  #     Runs on every trigger so native cdylibs are always smoke-tested.
+  # ---------------------------------------------------------------------------
+  java-native:
+    name: Java native (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: false
+            cargo_lib: libsnapdir_ffi.so
+            jar_lib: libsnapdir_ffi.so
+          - os: linux
+            arch: aarch64
+            rust_target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+            cargo_lib: libsnapdir_ffi.so
+            jar_lib: libsnapdir_ffi.so
+          - os: mac
+            arch: x86_64
+            rust_target: x86_64-apple-darwin
+            runner: macos-15-intel
+            cross: false
+            cargo_lib: libsnapdir_ffi.dylib
+            jar_lib: libsnapdir_ffi.dylib
+          - os: mac
+            arch: aarch64
+            rust_target: aarch64-apple-darwin
+            runner: macos-14
+            cross: false
+            cargo_lib: libsnapdir_ffi.dylib
+            jar_lib: libsnapdir_ffi.dylib
+          - os: win
+            arch: x86_64
+            rust_target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            cross: false
+            cargo_lib: snapdir_ffi.dll
+            jar_lib: libsnapdir_ffi.dll
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install cargo-zigbuild (Linux aarch64 cross)
+        if: matrix.cross
+        run: pip3 install ziglang && cargo install cargo-zigbuild --locked
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: java-native-${{ matrix.rust_target }}
+
+      - name: Build libsnapdir_ffi cdylib (cross via cargo-zigbuild)
+        if: matrix.cross
+        run: cargo zigbuild --release -p snapdir-ffi --target ${{ matrix.rust_target }}
+
+      - name: Build libsnapdir_ffi cdylib (native)
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: cargo build --release -p snapdir-ffi --target ${{ matrix.rust_target }}
+
+      - name: Stage native library (rename Windows dll to lib-prefixed jar name)
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.rust_target }}/release/${{ matrix.cargo_lib }}" \
+             "staging/${{ matrix.jar_lib }}"
+
+      - name: Upload java-native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-native-${{ matrix.os }}-${{ matrix.arch }}
+          path: staging/${{ matrix.jar_lib }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 11. Publish org.snapdir:snapdir to Maven Central via the Sonatype Central
+  #     Portal (central-publishing-maven-plugin). Assembles the fat JAR embedding
+  #     all 5 native cdylibs, GPG-signs every artifact, attaches sources + javadoc
+  #     jars, and deploys to the Portal staging queue.
+  #     autoPublish=false → lands in the Portal staging for the operator to click
+  #     "Publish" in the Central Portal UI to promote to Maven Central.
+  #     Set autoPublish=true in pom.xml to fully automate the promotion.
+  #
+  #     OPERATOR PRE-FLIGHT (one-time, before the first deploy):
+  #       1. Verify the org.snapdir namespace on the Central Portal:
+  #          https://central.sonatype.com → Namespaces → Add namespace → Verify.
+  #       2. Upload the GPG public key to keyservers so consumers can verify:
+  #            gpg --keyserver keyserver.ubuntu.com --send-keys <GPG_KEY_FINGERPRINT>
+  #            gpg --keyserver keys.openpgp.org     --send-keys <GPG_KEY_FINGERPRINT>
+  #       3. SONATYPE_USERNAME + SONATYPE_PASSWORD must be Central Portal User Token
+  #          credentials (portal.sonatype.com → User Token), not legacy OSSRH creds.
+  # ---------------------------------------------------------------------------
+  maven-publish:
+    name: Publish Maven Central (org.snapdir:snapdir)
+    needs: [release, java-native]
+    # Publish ONLY on a real `v*` tag push; a workflow_dispatch dry-run stops here.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 (Temurin) + configure central server + import GPG signing key
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          server-id: central
+          server-username: SONATYPE_USERNAME
+          server-password: SONATYPE_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Download all java-native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: java-native-*
+          path: native-libs
+
+      - name: Place native libs into JAR resource tree (matching NativeLoader.java paths)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each artifact dir contains exactly one file: libsnapdir_ffi.<ext>
+          # (Windows snapdir_ffi.dll was already renamed to libsnapdir_ffi.dll in staging).
+          # NativeLoader.java resource path: /native/<os>-<arch>/libsnapdir_ffi.<ext>
+          # (always lib-prefixed, even on Windows, because Java loads via InputStream).
+          for pair in \
+            "linux-x86_64:libsnapdir_ffi.so" \
+            "linux-aarch64:libsnapdir_ffi.so" \
+            "mac-x86_64:libsnapdir_ffi.dylib" \
+            "mac-aarch64:libsnapdir_ffi.dylib" \
+            "win-x86_64:libsnapdir_ffi.dll"; do
+            platform="${pair%%:*}"
+            libname="${pair##*:}"
+            destdir="bindings/java/src/main/resources/native/${platform}"
+            mkdir -p "${destdir}"
+            cp "native-libs/java-native-${platform}/${libname}" "${destdir}/${libname}"
+          done
+
+      - name: Deploy to Maven Central (GPG-signed, sources + javadoc + central-publishing deploy)
+        # Triggers maven-gpg-plugin (sign all artifacts), maven-source-plugin (attach sources
+        # jar), maven-javadoc-plugin (attach javadoc jar), and central-publishing-maven-plugin
+        # (sonatype central portal deploy). setup-java wrote central server credentials to
+        # ~/.m2/settings.xml (server id "central" matching pom.xml publishingServerId) and
+        # imported the GPG key for signing.
+        run: |
+          mvn --batch-mode -f bindings/java/pom.xml deploy \
+            -Dgpg.keyname=${{ secrets.GPG_KEY_FINGERPRINT }}
+        env:
+          MAVEN_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+  # ---------------------------------------------------------------------------
+  # 12. Create the Go submodule tag `bindings/go/vX.Y.Z` so GOPROXY can serve
+  #     the Go binding at `github.com/snapdir/snapdir/bindings/go@vX.Y.Z`.
+  #
+  #     Go has no registry or credential — the tag IS the release. When the
+  #     tag is pushed, proxy.golang.org discovers the module at the path
+  #     `github.com/snapdir/snapdir/bindings/go` via the standard module
+  #     directory convention (bindings/go/go.mod).  A consumer runs:
+  #       go get github.com/snapdir/snapdir/bindings/go@v1.11.0
+  #     A thin github.com/snapdir/go-snapdir mirror repo remains a future
+  #     concern (out of scope for this gate).
+  # ---------------------------------------------------------------------------
+  go-tag:
+    name: Create Go submodule tag
+    needs: release
+    # Tag-gated: only runs on a real `v*` tag push — never on dry-run dispatch.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the submodule tag
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create and push bindings/go/vX.Y.Z tag (idempotent)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          GO_TAG="bindings/go/v${VERSION}"
+          # Idempotent: if the tag already exists on origin, skip silently so
+          # re-runs are safe (mirrors the crates-io skip-guard philosophy).
+          if git ls-remote --tags origin "refs/tags/${GO_TAG}" | grep -q .; then
+            echo "${GO_TAG} already exists on origin; skipping"
+          else
+            git tag "${GO_TAG}"
+            git push origin "${GO_TAG}"
+            echo "pushed ${GO_TAG}"
+          fi

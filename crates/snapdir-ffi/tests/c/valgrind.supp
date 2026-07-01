@@ -1,0 +1,56 @@
+# Valgrind memcheck suppressions for the snapdir-ffi C ABI gate (m1-valgrind-zero-leak).
+#
+# These suppress ONLY "possibly lost" blocks belonging to the intentionally-never-dropped
+# embedded tokio runtime + its thread pools and glibc thread-local storage for live worker
+# threads. They are NOT real leaks:
+#   * `definitely lost: 0 bytes` and `indirectly lost: 0 bytes` (no genuine leaks).
+#   * the static `OnceLock<tokio::runtime::Runtime>` is never dropped BY DESIGN (judged BALANCED
+#     at m1-judge); each block here is reachable only via a live worker thread's registers /
+#     interior pointers, which valgrind conservatively reports as "possibly lost".
+# NONE of these touch `snapdir_*` / `CString` / `serde_json` — a real possibly-lost leak in the
+# ffi's own code is NOT suppressed and will still fail the gate (definitely/indirectly lost = 0
+# is also still enforced by --error-exitcode).
+
+{
+   snapdir-ffi: tokio blocking-pool JoinHandle map (static runtime, never dropped)
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:*Spawner*spawn_task*
+   ...
+}
+{
+   snapdir-ffi: tokio blocking-pool worker thread spawn (static runtime, never dropped)
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:*Spawner*spawn_thread*
+   ...
+}
+{
+   snapdir-ffi: glibc thread-local storage for a live worker thread (never freed while alive)
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:_dl_allocate_tls
+   ...
+   fun:pthread_create*
+   ...
+}
+{
+   snapdir-ffi: rayon parallel-walk thread pool registry (never dropped)
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:*rayon_core*Registry*new*
+   ...
+}
+{
+   snapdir-ffi: crossbeam-epoch GC local registration (runtime reclamation, never dropped)
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:*crossbeam_epoch*Local*register*
+   ...
+}

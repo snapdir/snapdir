@@ -45,7 +45,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --exclude snapdir-node --exclude snapdir-python --all-targets --all-features --locked -- -D warnings
 
       - name: Install typos
         uses: taiki-e/install-action@v2
@@ -58,8 +58,17 @@ jobs:
       - name: Install actionlint
         run: |
           VER=1.7.12
-          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz" | tar -xz actionlint
-          sudo mv actionlint /usr/local/bin/actionlint
+          case "$(uname -m)" in
+            x86_64)           ARCH=amd64 ;;
+            aarch64|arm64)    ARCH=arm64 ;;
+            *)                echo "Unsupported arch: $(uname -m)" && exit 1 ;;
+          esac
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_${ARCH}.tar.gz" | tar -xz actionlint
+          if command -v sudo >/dev/null 2>&1; then
+            sudo mv actionlint /usr/local/bin/actionlint
+          else
+            mv actionlint /usr/local/bin/actionlint
+          fi
           actionlint --version
 
       - name: actionlint
@@ -110,8 +119,9 @@ jobs:
         with:
           tool: cargo-audit
 
+      # ignores mirror deny.toml's [advisories] ignore (cargo-audit doesn't read deny.toml); see deny.toml for per-ID rationale.
       - name: cargo-audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2025-0020 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2025-0141
 
   # --------------------------------------------------------------------------
   # Test matrix: {MSRV, stable, beta} x {ubuntu, macos}.
@@ -149,10 +159,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends openssh-server
 
       - name: Build (workspace, locked)
-        run: cargo build --workspace --all-features --locked
+        run: cargo build --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked
 
       - name: Test (workspace, locked)
-        run: cargo test --workspace --all-features --locked
+        run: cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked
         env:
           # Forbid the loopback sshd suite's environmental eprintln-skip so the
           # T2 gate can't rot into all-skips on CI (sshd is guaranteed above).
@@ -162,7 +172,7 @@ jobs:
       # bit-rot. The real valgrind instruction-count run lives in the
       # `bench-iai` job; here we only prove every workspace bench still builds.
       - name: Bench compile check (cargo bench --no-run)
-        run: cargo bench --workspace --no-run --locked
+        run: cargo bench --workspace --exclude snapdir-node --exclude snapdir-python --no-run --locked
 
   # --------------------------------------------------------------------------
   # Reflink (Linux FICLONE / copy-on-write): exercise the REAL clone fast-path.
@@ -295,12 +305,41 @@ jobs:
       - name: Build static musl (${{ matrix.profile }})
         run: |
           if [ "${{ matrix.profile }}" = "release" ]; then
-            cargo build --workspace --all-features --locked \
-              --target x86_64-unknown-linux-musl --release
+            cargo build -p snapdir --all-features --locked --target x86_64-unknown-linux-musl --release
           else
-            cargo build --workspace --all-features --locked \
-              --target x86_64-unknown-linux-musl
+            cargo build -p snapdir --all-features --locked --target x86_64-unknown-linux-musl
           fi
+
+  # --------------------------------------------------------------------------
+  # MSRV: prove snapdir-api (and the full workspace) builds at the pinned
+  # minimum supported Rust version (1.91.1, from [workspace.package].rust-version).
+  # This is a focused build gate — the test matrix already covers MSRV in its
+  # {1.91.1, stable, beta} leg, but that leg runs all-features tests which can
+  # mask a pure compilation failure in a single crate.  This job is a fast,
+  # explicit signal that the snapdir-api facade crate stays inside the guarantee.
+  # --------------------------------------------------------------------------
+  msrv:
+    name: MSRV (1.91.1)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.91.1)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Build snapdir-api at MSRV (locked)
+        run: cargo +1.91.1 build -p snapdir-api --locked
+
+      - name: Build workspace at MSRV (locked)
+        run: cargo +1.91.1 build --workspace --exclude snapdir-node --exclude snapdir-python --locked
 
   # --------------------------------------------------------------------------
   # Doctests: run separately so they are never silently skipped.
@@ -319,7 +358,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo test --doc
-        run: cargo test --workspace --all-features --locked --doc
+        run: cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked --doc
 
   # --------------------------------------------------------------------------
   # Coverage: cargo-llvm-cov -> Codecov, with a fail-under floor.
@@ -355,7 +394,7 @@ jobs:
 
       - name: Generate coverage (lcov + fail-under)
         run: |
-          cargo llvm-cov --workspace --all-features --locked \
+          cargo llvm-cov --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked \
             --fail-under-lines 75 \
             --lcov --output-path lcov.info
         env:

@@ -1,0 +1,4 @@
+lib/
+include/snapdir.h
+build/
+snapdir.pc

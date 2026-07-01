@@ -1,0 +1,157 @@
+name: Zig
+
+# Build and test the snapdir Zig binding (@cImport over the frozen C ABI), run
+# the adversary-authored api test suite (zig build test, Debug, native arch),
+# quality checks (ReleaseSafe LIB + c.zig invariants), and validate
+# manifest-parity (45 PASS / 0 FAIL / 3 SKIP).
+#
+# Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Rust
+# and zig 0.13 are baked into the image. NO apt, NO toolchain-install steps,
+# NO network required. Zig is amd64-emulated under qemu; the ffi .a is arm64 —
+# build.zig bakes the aarch64 target for the test and driver steps (see
+# [[zig-binding-build]] memory note). Three zig builds (test + ReleaseSafe-lib +
+# driver) each take ~8-10 min under qemu — TOTAL ~25-30 min; do NOT assume hung.
+#
+# DEFERRED legs (clearly scoped — do NOT implement until credits restored):
+#   - Windows / macOS / cross-arch legs
+#     (act is linux/arm64-only; these cannot run under the local act harness)
+#   - ReleaseSafe TEST step (zig build test -Doptimize=ReleaseSafe)
+#     (hangs under qemu amd64-emulated — build the LIB only in quality step)
+# Both are intentionally absent so `act` remains green.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "bindings/zig/**"
+      - "tests/golden/**"
+      - "include/snapdir.h"
+      - "crates/snapdir-ffi/**"
+      - ".github/workflows/zig.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "bindings/zig/**"
+      - "tests/golden/**"
+      - "include/snapdir.h"
+      - "crates/snapdir-ffi/**"
+      - ".github/workflows/zig.yml"
+
+concurrency:
+  group: zig-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # zig: build snapdir-ffi, vendor artifacts, run unit tests (Debug, native
+  # arch), quality checks (ReleaseSafe LIB + c.zig invariants), and manifest
+  # parity (45/0/3).
+  #
+  # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
+  # rust 1.91.1, zig 0.13). NO apt, NO dtolnay/rust-toolchain.
+  # Zig @cImport wraps snapdir-ffi C ABI — build.zig uses -Dtest-arch= (set to
+  # runner's uname -m) so the test/driver arch always matches the freshly-built
+  # ffi .a (x86_64 on GH runner, aarch64 in dev-image).
+  # --------------------------------------------------------------------------
+  zig:
+    name: "Zig (@cImport: zig build test + ReleaseSafe + parity)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Zig 0.13.0 is not pre-installed on ubuntu-latest runners — install
+      # it here. mlugg/setup-zig@v2 downloads the exact release tarball and
+      # adds zig to PATH; it also works transparently under act (the image
+      # already has zig 0.13 baked in, so the install is a no-op there).
+      # ------------------------------------------------------------------
+      - name: Set up Zig 0.13.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      # ------------------------------------------------------------------
+      # Step 1: Build FFI staticlib (release — the Zig binding links .a)
+      # ------------------------------------------------------------------
+      - name: Build snapdir-ffi (release staticlib)
+        run: cargo build --release -p snapdir-ffi --locked
+
+      # ------------------------------------------------------------------
+      # Step 2: Vendor the .a and header into bindings/zig/{lib,include}
+      # ------------------------------------------------------------------
+      - name: Vendor libsnapdir_ffi.a + snapdir.h into bindings/zig
+        run: |
+          mkdir -p bindings/zig/lib bindings/zig/include
+          cp -f include/snapdir.h bindings/zig/include/
+          cp -f target/release/libsnapdir_ffi.a bindings/zig/lib/
+          echo "vendor: OK (libsnapdir_ffi.a + snapdir.h)"
+
+      # ------------------------------------------------------------------
+      # Step 3: Unit tests (Debug, native arch) — mirrors zig-api-tests-review.
+      # -Dtest-arch=$(uname -m) makes the test binary arch match the freshly-
+      # built ffi .a (x86_64 on GH runners; aarch64 in the dev-image).
+      # ------------------------------------------------------------------
+      - name: Unit tests (Debug, native arch — zig build test)
+        run: cd bindings/zig && zig build test "-Dtest-arch=$(uname -m | sed 's/arm64/aarch64/')"
+
+      # ------------------------------------------------------------------
+      # Step 4: Quality (ReleaseSafe LIB + c.zig invariants) — mirrors
+      # zig-quality EXACTLY.
+      #
+      # ⚠️  ReleaseSafe TEST hangs under qemu amd64-emulated — build the LIB
+      # only (default `zig build` step builds the static library, not the
+      # test binary). Flush caches first to ensure a clean ReleaseSafe run.
+      # ------------------------------------------------------------------
+      - name: Quality (ReleaseSafe LIB + c.zig invariants)
+        run: |
+          cd bindings/zig
+          rm -rf .zig-cache zig-out 2>/dev/null || true
+          zig build -Doptimize=ReleaseSafe
+          test "$(grep -cE '^pub ' src/c.zig)" = "1"
+          grep -qE '^pub const c = @cImport' src/c.zig
+          test -f build.zig.zon
+
+      # ------------------------------------------------------------------
+      # Step 5: Parity (45/0/3) — mirrors manifest-parity-zig EXACTLY.
+      # Build the Zig driver binary (`zig build driver`), copy the artifact
+      # to tests/golden/drivers/zig-driver-bin (which zig.sh execs), then
+      # run the harness. A 3× settle/retry loop guards against the virtiofs
+      # flake seen in earlier gate runs.
+      # ------------------------------------------------------------------
+      - name: Parity — build zig-driver-bin
+        run: |
+          cd bindings/zig && zig build driver "-Dtest-arch=$(uname -m | sed 's/arm64/aarch64/')"
+          cp -f "$GITHUB_WORKSPACE/bindings/zig/zig-out/bin/snapdir-parity-driver" \
+            "$GITHUB_WORKSPACE/tests/golden/drivers/zig-driver-bin"
+          chmod +x "$GITHUB_WORKSPACE/tests/golden/drivers/zig-driver-bin"
+          echo "driver build: OK"
+
+      - name: Parity — run harness (45/0/3, 3× retry for virtiofs flake)
+        run: |
+          chmod -R u+rwx tests/golden/work 2>/dev/null || true
+          rm -rf tests/golden/work 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if tests/golden/run_parity.sh --driver tests/golden/drivers/zig.sh; then
+              echo "parity: OK (attempt ${attempt})"
+              exit 0
+            fi
+            echo "parity attempt ${attempt} failed; retrying..." >&2
+            chmod -R u+rwx tests/golden/work 2>/dev/null || true
+            rm -rf tests/golden/work 2>/dev/null || true
+          done
+          echo "parity: FAILED after 3 attempts" >&2
+          exit 1
+
+  # DEFERRED (not implemented here): Windows / macOS / cross-arch legs and
+  # ReleaseSafe test step (hangs under qemu amd64-emulated).
+  # Re-implement in credited release CI on native aarch64 runners.

@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  snapdir Java binding — Maven POM.
+
+  NOTE: The gatesmith CI image does NOT have Maven installed; the gate
+  verification compiles via raw javac. This file is shipped for consumers
+  who DO have Maven, and documents the required compiler/runtime flags.
+
+  Usage (with Maven installed):
+    mvn compile
+    mvn package
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.snapdir</groupId>
+  <artifactId>snapdir</artifactId>
+  <version>1.11.0</version>
+  <packaging>jar</packaging>
+
+  <name>snapdir</name>
+  <description>Java binding for the snapdir-ffi C ABI via JDK 17 Foreign Function API</description>
+  <url>https://snapdir.org</url>
+
+  <licenses>
+    <license>
+      <name>MIT OR Apache-2.0</name>
+      <url>https://github.com/snapdir/snapdir/blob/main/LICENSE</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <scm>
+    <connection>scm:git:https://github.com/snapdir/snapdir.git</connection>
+    <developerConnection>scm:git:https://github.com/snapdir/snapdir.git</developerConnection>
+    <url>https://github.com/snapdir/snapdir</url>
+  </scm>
+
+  <developers>
+    <developer>
+      <id>snapdir</id>
+      <name>snapdir maintainers</name>
+      <email>maintainers@snapdir.org</email>
+      <url>https://snapdir.org</url>
+      <organization>snapdir</organization>
+      <organizationUrl>https://snapdir.org</organizationUrl>
+    </developer>
+  </developers>
+
+  <distributionManagement>
+    <repository>
+      <id>central</id>
+      <url>https://central.sonatype.com/api/v1/publisher/upload</url>
+    </repository>
+  </distributionManagement>
+
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.0</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Compiler: enable jdk.incubator.foreign -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <source>17</source>
+          <target>17</target>
+          <compilerArgs>
+            <arg>--add-modules</arg>
+            <arg>jdk.incubator.foreign</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+
+      <!-- Surefire: enable native access at runtime -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.1.2</version>
+        <configuration>
+          <argLine>
+            --add-modules jdk.incubator.foreign
+            --enable-native-access=ALL-UNNAMED
+          </argLine>
+        </configuration>
+      </plugin>
+
+      <!-- JPMS automatic module name + implementation title in the manifest.
+           Matches the manifest written by the de-gradled gate verification so
+           a credited-CI Maven build produces the same artifact. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.3.0</version>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.snapdir</Automatic-Module-Name>
+              <Implementation-Title>snapdir</Implementation-Title>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <!-- Include native resources in the JAR -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.3.1</version>
+        <configuration>
+          <includeEmptyDirs>false</includeEmptyDirs>
+        </configuration>
+      </plugin>
+
+      <!-- Sources JAR (Maven Central requirement) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Javadoc JAR (Maven Central requirement) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.6.3</version>
+        <configuration>
+          <additionalJOptions>
+            <additionalJOption>--add-modules</additionalJOption>
+            <additionalJOption>jdk.incubator.foreign</additionalJOption>
+          </additionalJOptions>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- GPG signing (Maven Central requirement) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>3.2.4</version>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals><goal>sign</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Sonatype Central Portal publishing plugin -->
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.6.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <tokenAuth>true</tokenAuth>
+          <autoPublish>false</autoPublish>
+        </configuration>
+      </plugin>
+    </plugins>
+
+    <!-- Include src/main/resources (native libs under native/<platform>/) -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+    </resources>
+  </build>
+</project>

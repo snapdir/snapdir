@@ -1,0 +1,14 @@
+.{
+    .name = "snapdir",
+    // binding-versioning policy (P43): bindings mirror snapdir-core (1.11.0).
+    .version = "1.11.0",
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "LICENSE",
+    },
+    .dependencies = .{},
+    .minimum_zig_version = "0.13.0",
+}

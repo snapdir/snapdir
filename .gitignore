@@ -16,3 +16,23 @@ utils/qa-fixtures/latest-guide-commands.txt
 
 # Coverage output (cargo llvm-cov / pre-push suite)
 lcov.info
+
+# --- Golden fixtures scratch tree (gen_fixtures.sh regenerates; never committed) ---
+tests/golden/work/
+
+# --- Parity-harness sidecar boot artifacts (sidecars-up.sh regenerates per run; never committed) ---
+# Includes a generated test-only SSH keypair + the boot env — ephemeral, must NOT be in git.
+/scripts/
+docker/scripts/sidecars.env
+tests/golden/drivers/go-driver-bin
+.go-cache/
+tests/golden/drivers/cpp-driver-bin
+tests/golden/drivers/zig-driver-bin
+
+# Phase 44 integration relay scratch (fixtures/work dirs)
+tests/integration/.relay-work/
+tests/integration/artifacts/
+
+# Python bytecode cache (gatesmith doc-checker scripts)
+.gatesmith/scripts/__pycache__/
+*.pyc
