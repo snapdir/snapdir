@@ -649,6 +649,9 @@ jobs:
 
       - name: Publish to PyPI (Trusted Publishing / OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent re-runs: skip files already on PyPI (e.g. a matrix-repair re-tag).
+          skip-existing: true
 
   # ---------------------------------------------------------------------------
   # 10. Pre-build the libsnapdir_ffi cdylib for 5 OS/arch targets needed by the
