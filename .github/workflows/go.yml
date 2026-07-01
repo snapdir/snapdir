@@ -58,13 +58,22 @@ jobs:
 
     env:
       CGO_ENABLED: "1"
-      GOARCH: arm64
       CC: gcc
       GOFLAGS: -buildvcs=false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # actions/setup-go@v5 ensures a consistent Go toolchain is on PATH on
+      # real ubuntu-latest GH runners; under act the image already has go 1.22+
+      # baked in, so this step is a low-cost pass-through there.
+      # ------------------------------------------------------------------
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
 
       # ------------------------------------------------------------------
       # Step 1: Build FFI staticlib (release — the Go binding links .a)
@@ -83,13 +92,14 @@ jobs:
           echo "vendor: OK (libsnapdir_ffi.a + snapdir.h)"
 
       # ------------------------------------------------------------------
-      # Step 3: C ABI lockstep — cheap tripwire that the vendored header
-      # matches the frozen ABI lock (mirrors go-cabi-lockstep gate).
+      # Step 3: C ABI lockstep — verify the vendored header matches the
+      # canonical include/snapdir.h. The sha.lock is a dev-only artifact
+      # (stripped from main); the header diff is the public-CI equivalent
+      # tripwire.
       # ------------------------------------------------------------------
-      - name: C ABI lockstep (header diff + sha lock)
+      - name: C ABI lockstep (header diff)
         run: |
           diff bindings/go/include/snapdir.h include/snapdir.h
-          shasum -a 256 -c .gatesmith/c-abi.sha.lock
           echo "cabi-lockstep: OK"
 
       # ------------------------------------------------------------------
@@ -103,7 +113,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Vet + staticcheck + race tests
         run: |
-          SC="$(go env GOPATH)/bin/linux_arm64/staticcheck"
+          SC="$(go env GOPATH)/bin/staticcheck"
           cd bindings/go
           go vet ./...
           if [ -x "$SC" ]; then
@@ -140,22 +150,6 @@ jobs:
           echo "parity: FAILED after 3 attempts" >&2
           exit 1
 
-  # --------------------------------------------------------------------------
-  # deferred: per-GOOS/GOARCH prebuilt lib distribution (intentionally disabled).
-  #
-  # Building per-OS prebuilt .a/.so/.dylib/.dll and cross-OS legs are deferred
-  # to credited release CI — act is linux/arm64-only and cannot run these
-  # environments. Remove `if: false` and implement when GH credits are restored
-  # and cross-compilation / OS matrix runners are available.
-  # --------------------------------------------------------------------------
-  deferred-cross-os:
-    name: Per-GOOS/GOARCH prebuilds (deferred)
-    runs-on: ubuntu-latest
-    if: false
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Per-GOOS/GOARCH prebuilt libs (deferred)
-        run: echo "Per-GOOS/GOARCH prebuilt lib distribution — deferred to credited release CI (act is linux/arm64-only)."
-      - name: Windows/macOS/cross-arch legs (deferred)
-        run: echo "Windows/macOS/cross-arch legs — deferred to credited release CI (act is linux/arm64-only)."
+  # DEFERRED (not implemented here): per-GOOS/GOARCH prebuilt .a/.so/.dylib/.dll
+  # distribution + cross-OS legs. Re-implement in credited release CI when
+  # cross-compilation / OS matrix runners are available.

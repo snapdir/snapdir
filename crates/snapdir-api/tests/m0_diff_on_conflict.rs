@@ -11,9 +11,7 @@
 
 use std::path::PathBuf;
 
-use snapdir_api::{
-    ConflictPolicy, DiffOptions, DiffStatus, SnapdirError, StageOptions, StoreUri,
-};
+use snapdir_api::{ConflictPolicy, DiffOptions, DiffStatus, SnapdirError, StageOptions, StoreUri};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -165,9 +163,13 @@ async fn on_conflict_last_wins_selects_last_uri() {
         on_conflict: ConflictPolicy::LastWins,
         ..DiffOptions::default()
     };
-    let entries = snapdir_api::diff(&opts).await.expect("last-wins must not error");
+    let entries = snapdir_api::diff(&opts)
+        .await
+        .expect("last-wins must not error");
     assert!(
-        entries.iter().all(|e| e.path != PathBuf::from("./clash.txt")),
+        entries
+            .iter()
+            .all(|e| e.path != PathBuf::from("./clash.txt")),
         "last-wins resolved FROM.clash=RIGHT-WINS == TO.clash → must be hidden; \
          got entries: {entries:?}"
     );
@@ -184,7 +186,9 @@ async fn on_conflict_last_wins_selects_last_uri() {
         on_conflict: ConflictPolicy::LastWins,
         ..DiffOptions::default()
     };
-    let entries2 = snapdir_api::diff(&opts2).await.expect("last-wins must not error");
+    let entries2 = snapdir_api::diff(&opts2)
+        .await
+        .expect("last-wins must not error");
     let clash_entry = entries2
         .iter()
         .find(|e| e.path == PathBuf::from("./clash.txt"));
@@ -227,7 +231,9 @@ async fn no_collision_single_store_per_side_unchanged() {
         to: vec![to_uri],
         ..DiffOptions::default()
     };
-    let entries = snapdir_api::diff(&opts).await.expect("single-store diff must succeed");
+    let entries = snapdir_api::diff(&opts)
+        .await
+        .expect("single-store diff must succeed");
 
     let find = |name: &str| {
         entries
@@ -236,10 +242,22 @@ async fn no_collision_single_store_per_side_unchanged() {
             .map(|e| e.status)
     };
 
-    assert_eq!(find("a.txt"), Some(DiffStatus::Deleted), "a.txt must be Deleted");
-    assert_eq!(find("c.txt"), Some(DiffStatus::Added), "c.txt must be Added");
+    assert_eq!(
+        find("a.txt"),
+        Some(DiffStatus::Deleted),
+        "a.txt must be Deleted"
+    );
+    assert_eq!(
+        find("c.txt"),
+        Some(DiffStatus::Added),
+        "c.txt must be Added"
+    );
     // b.txt is Unchanged — hidden by default (all=false).
-    assert_eq!(find("b.txt"), None, "b.txt must be hidden (Unchanged, all=false)");
+    assert_eq!(
+        find("b.txt"),
+        None,
+        "b.txt must be hidden (Unchanged, all=false)"
+    );
 }
 
 /// Same-content collision (same path, SAME fingerprint on one side from multiple
@@ -271,12 +289,15 @@ async fn same_content_multi_store_not_a_collision() {
         on_conflict: ConflictPolicy::Error, // must NOT error for same-content
         ..DiffOptions::default()
     };
-    let entries = snapdir_api::diff(&opts).await
+    let entries = snapdir_api::diff(&opts)
+        .await
         .expect("same-content multi-store union must succeed (not a collision)");
 
     // shared.txt is identical on both sides → Unchanged → hidden (all=false).
     assert!(
-        entries.iter().all(|e| e.path != PathBuf::from("./shared.txt")),
+        entries
+            .iter()
+            .all(|e| e.path != PathBuf::from("./shared.txt")),
         "shared.txt with identical content on both sides must be hidden; got: {entries:?}"
     );
 }

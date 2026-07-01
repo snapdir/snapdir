@@ -120,8 +120,7 @@ impl SnapdirError {
         Self {
             message: CString::new(msg_str)
                 .unwrap_or_else(|_| CString::new("(message encoding error)").unwrap()),
-            code: CString::new(code_str)
-                .unwrap_or_else(|_| CString::new("INTERNAL").unwrap()),
+            code: CString::new(code_str).unwrap_or_else(|_| CString::new("INTERNAL").unwrap()),
         }
     }
 
@@ -150,10 +149,7 @@ impl SnapdirError {
 /// # Safety
 ///
 /// `err_out` must be either NULL or a valid pointer to a `*mut SnapdirError`.
-unsafe fn write_error_out(
-    e: &snapdir_api::SnapdirError,
-    err_out: *mut *mut SnapdirError,
-) {
+unsafe fn write_error_out(e: &snapdir_api::SnapdirError, err_out: *mut *mut SnapdirError) {
     if err_out.is_null() {
         return;
     }
@@ -167,10 +163,7 @@ unsafe fn write_error_out(
 /// # Safety
 ///
 /// `err_out` must be either NULL or a valid pointer to a `*mut SnapdirError`.
-unsafe fn write_panic_out(
-    msg: impl Into<String>,
-    err_out: *mut *mut SnapdirError,
-) {
+unsafe fn write_panic_out(msg: impl Into<String>, err_out: *mut *mut SnapdirError) {
     if err_out.is_null() {
         return;
     }
@@ -212,7 +205,11 @@ pub extern "C" fn snapdir_init() {
     // An unwind across the extern "C" boundary is UB, so we catch the panic
     // and abort cleanly instead.  snapdir_init has no error channel — it
     // returns void by design — so process::abort() is the only safe option.
-    if std::panic::catch_unwind(|| { let _ = shared_rt(); }).is_err() {
+    if std::panic::catch_unwind(|| {
+        let _ = shared_rt();
+    })
+    .is_err()
+    {
         std::process::abort();
     }
 }
@@ -343,11 +340,7 @@ pub unsafe extern "C" fn snapdir_error_code(err: *const SnapdirError) -> *const 
 /// This is an internal helper (`pub(crate)`) — it is not part of the `extern
 /// "C"` surface.
 #[allow(dead_code)] // used by later gates
-pub(crate) fn catch_entry<T, F>(
-    body: F,
-    default: T,
-    err_out: *mut *mut SnapdirError,
-) -> T
+pub(crate) fn catch_entry<T, F>(body: F, default: T, err_out: *mut *mut SnapdirError) -> T
 where
     F: FnOnce() -> T + std::panic::UnwindSafe,
 {
@@ -502,7 +495,11 @@ pub unsafe extern "C" fn snapdir_id(
             }
 
             // walk_jobs: 0 = auto (None); otherwise Some(n).
-            opts.walk_jobs = if walk_jobs == 0 { None } else { Some(walk_jobs as usize) };
+            opts.walk_jobs = if walk_jobs == 0 {
+                None
+            } else {
+                Some(walk_jobs as usize)
+            };
 
             // cache_dir: NULL = use default (None); non-NULL = override.
             // SAFETY: cache_dir may be NULL (documented).
@@ -604,7 +601,11 @@ pub unsafe extern "C" fn snapdir_manifest(
             }
 
             // walk_jobs: 0 = auto; otherwise Some(n).
-            opts.walk_jobs = if walk_jobs == 0 { None } else { Some(walk_jobs as usize) };
+            opts.walk_jobs = if walk_jobs == 0 {
+                None
+            } else {
+                Some(walk_jobs as usize)
+            };
 
             // checksum_bin: NULL = b3sum (default).
             // SAFETY: checksum_bin may be NULL.
@@ -1381,7 +1382,10 @@ pub unsafe extern "C" fn snapdir_verify_blocking(
                     return -1;
                 }
             };
-            let opts = snapdir_api::VerifyOptions { purge, ..Default::default() };
+            let opts = snapdir_api::VerifyOptions {
+                purge,
+                ..Default::default()
+            };
 
             match shared_rt().block_on(snapdir_api::verify(&snap_id, &store_uri_parsed, &opts)) {
                 Ok(result) => {
@@ -1502,25 +1506,23 @@ pub unsafe extern "C" fn snapdir_diff_json(
             // Parse the optional `id` arg.
             // SAFETY: id may be NULL.
             let snap_id_opt = match unsafe { cstr_to_str(id, "id", err_out) } {
-                Some(id_str) => {
-                    match snapdir_api::SnapshotId::from_hex(id_str) {
-                        Ok(sid) => Some(sid),
-                        Err(e) => {
-                            unsafe { ffi_write_api_error(&e, err_out) };
-                            return std::ptr::null_mut();
-                        }
+                Some(id_str) => match snapdir_api::SnapshotId::from_hex(id_str) {
+                    Ok(sid) => Some(sid),
+                    Err(e) => {
+                        unsafe { ffi_write_api_error(&e, err_out) };
+                        return std::ptr::null_mut();
                     }
-                }
+                },
                 None => None,
             };
 
             // Parse conflict policy.
             // SAFETY: on_conflict may be NULL.
-            let conflict_policy =
-                match unsafe { cstr_to_str(on_conflict, "on_conflict", err_out) } {
-                    Some("last-wins") => snapdir_api::ConflictPolicy::LastWins,
-                    _ => snapdir_api::ConflictPolicy::Error,
-                };
+            let conflict_policy = match unsafe { cstr_to_str(on_conflict, "on_conflict", err_out) }
+            {
+                Some("last-wins") => snapdir_api::ConflictPolicy::LastWins,
+                _ => snapdir_api::ConflictPolicy::Error,
+            };
 
             // Delegate PURELY to snapdir_api::diff for BOTH id=NULL and id=non-NULL.
             //

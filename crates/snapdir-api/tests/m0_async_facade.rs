@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use snapdir_api::{
-    CheckoutOptions, DiffEntry, DiffOptions, ManifestOptions, PushSource, SnapdirError,
-    SnapshotId, StageOptions, StoreUri, TransferOptions, VerifyOptions, VerifyResult,
+    CheckoutOptions, DiffEntry, DiffOptions, ManifestOptions, PushSource, SnapdirError, SnapshotId,
+    StageOptions, StoreUri, TransferOptions, VerifyOptions, VerifyResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,9 @@ fn file_store() -> (tempfile::TempDir, StoreUri) {
 }
 
 fn is_64_lower_hex(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == 64
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 // ===========================================================================
@@ -129,7 +131,9 @@ async fn push_staged_id_then_checkout_reids_to_source() {
         .expect("push staged id");
     assert_eq!(pushed, src_id);
 
-    snapdir_api::fetch(&pushed, &store, &to).await.expect("fetch");
+    snapdir_api::fetch(&pushed, &store, &to)
+        .await
+        .expect("fetch");
     let dest = tempfile::tempdir().expect("dest");
     snapdir_api::checkout(&pushed, dest.path(), &CheckoutOptions::default())
         .await
@@ -349,7 +353,11 @@ async fn repeated_drop_and_cancel_then_full_roundtrip() {
     for _ in 0..8 {
         let (_g, root) = fixture_tree();
         let (_sg, store) = file_store();
-        drop(snapdir_api::push(PushSource::Path(root.as_path()), &store, &to));
+        drop(snapdir_api::push(
+            PushSource::Path(root.as_path()),
+            &store,
+            &to,
+        ));
         let (_g2, root2) = fixture_tree();
         let (_sg2, store2) = file_store();
         let _ = tokio::time::timeout(
@@ -493,7 +501,10 @@ async fn push_to_unwritable_store_path_yields_typed_error() {
     let (_g, root) = fixture_tree();
     let to = TransferOptions::default();
     let res = snapdir_api::push(PushSource::Path(root.as_path()), &store, &to).await;
-    assert!(res.is_err(), "push into a file-occupied store path must error");
+    assert!(
+        res.is_err(),
+        "push into a file-occupied store path must error"
+    );
     let _typed: SnapdirError = res.unwrap_err();
 
     // Runtime survives the error: a fresh push to a good store still works.
@@ -525,7 +536,10 @@ fn manifest_is_callable_outside_any_runtime() {
     let (_g, root) = fixture_tree();
     let m = snapdir_api::manifest(root.as_path(), &ManifestOptions::default())
         .expect("manifest() works with no runtime present");
-    assert!(!m.entries.is_empty(), "manifest has entries for a real tree");
+    assert!(
+        !m.entries.is_empty(),
+        "manifest has entries for a real tree"
+    );
     assert!(!m.raw.is_empty(), "manifest carries its rendered raw text");
 }
 
@@ -557,7 +571,8 @@ fn sync_fns_do_not_require_async_for_empty_tree_edge_case() {
     let _: SnapshotId =
         snapdir_api::id(td.path(), &ManifestOptions::default()).expect("id of empty tree (sync)");
     let path: &Path = td.path();
-    let _ = snapdir_api::manifest(path, &ManifestOptions::default()).expect("manifest of empty tree");
+    let _ =
+        snapdir_api::manifest(path, &ManifestOptions::default()).expect("manifest of empty tree");
 }
 
 // ===========================================================================
@@ -622,7 +637,10 @@ async fn high_volume_calls_from_nested_async_contexts_never_recreate_a_runtime()
         }));
     }
     for t in tasks {
-        assert!(t.await.expect("outer join"), "every nested-context op verifies ok");
+        assert!(
+            t.await.expect("outer join"),
+            "every nested-context op verifies ok"
+        );
     }
 }
 
@@ -643,7 +661,11 @@ async fn shared_runtime_survives_many_blocking_calls_from_a_blocking_thread() {
             let (sg, store) = file_store();
             let to = TransferOptions::default();
             let id = handle
-                .block_on(snapdir_api::push(PushSource::Path(root.as_path()), &store, &to))
+                .block_on(snapdir_api::push(
+                    PushSource::Path(root.as_path()),
+                    &store,
+                    &to,
+                ))
                 .expect("block_on push from a blocking thread");
             let ok = handle
                 .block_on(snapdir_api::verify(&id, &store, &VerifyOptions::default()))
@@ -677,7 +699,11 @@ async fn slow_blocking_op_does_not_stall_the_reactor() {
     // ~200 small files: enough hashing+IO that the push clearly outlasts a few
     // 1ms timer ticks, without making the test slow.
     for i in 0..200 {
-        std::fs::write(root.join(format!("f{i:04}.bin")), vec![(i % 251) as u8; 4096]).unwrap();
+        std::fs::write(
+            root.join(format!("f{i:04}.bin")),
+            vec![(i % 251) as u8; 4096],
+        )
+        .unwrap();
     }
     let (_sg, store) = file_store();
     let to = TransferOptions::default();
@@ -885,8 +911,14 @@ async fn two_consecutive_failing_async_ops_both_typed_then_runtime_usable() {
         assert!(
             matches!(
                 code,
-                "STORE_ERROR" | "IO_ERROR" | "CATALOG_ERROR" | "HASH_MISMATCH"
-                    | "IN_FLUX" | "INVALID_ID" | "INVALID_STORE" | "CONFLICT"
+                "STORE_ERROR"
+                    | "IO_ERROR"
+                    | "CATALOG_ERROR"
+                    | "HASH_MISMATCH"
+                    | "IN_FLUX"
+                    | "INVALID_ID"
+                    | "INVALID_STORE"
+                    | "CONFLICT"
             ),
             "failing async op maps to a documented error code, got {code:?}: {e}"
         );

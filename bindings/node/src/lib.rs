@@ -125,7 +125,10 @@ fn api_manifest_to_napi(m: snapdir_api::Manifest) -> Manifest {
             }
         })
         .collect();
-    Manifest { entries, raw: m.raw }
+    Manifest {
+        entries,
+        raw: m.raw,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -438,12 +441,8 @@ pub async fn pull(snapshot_id: String, store_uri: String, dest: String) -> napi:
 pub async fn checkout(snapshot_id: String, dest: String) -> napi::Result<()> {
     let sid = api_result(snapdir_api::SnapshotId::from_hex(&snapshot_id))?;
     let dest_path = std::path::PathBuf::from(dest);
-    let result = snapdir_api::checkout(
-        &sid,
-        &dest_path,
-        &snapdir_api::CheckoutOptions::default(),
-    )
-    .await;
+    let result =
+        snapdir_api::checkout(&sid, &dest_path, &snapdir_api::CheckoutOptions::default()).await;
     api_result(result)
 }
 
@@ -463,13 +462,8 @@ pub async fn sync_snapshot(
     let sid = api_result(snapdir_api::SnapshotId::from_hex(&snapshot_id))?;
     let src = api_result(snapdir_api::StoreUri::parse(&src_uri))?;
     let dst = api_result(snapdir_api::StoreUri::parse(&dst_uri))?;
-    let result = snapdir_api::sync(
-        &sid,
-        &src,
-        &dst,
-        &snapdir_api::TransferOptions::default(),
-    )
-    .await;
+    let result =
+        snapdir_api::sync(&sid, &src, &dst, &snapdir_api::TransferOptions::default()).await;
     api_result(result)
 }
 
@@ -524,11 +518,6 @@ pub async fn diff(params: DiffParams) -> napi::Result<Vec<DiffEntry>> {
 pub async fn verify(snapshot_id: String, store_uri: String) -> napi::Result<VerifyResult> {
     let sid = api_result(snapdir_api::SnapshotId::from_hex(&snapshot_id))?;
     let store = api_result(snapdir_api::StoreUri::parse(&store_uri))?;
-    let result = snapdir_api::verify(
-        &sid,
-        &store,
-        &snapdir_api::VerifyOptions::default(),
-    )
-    .await;
+    let result = snapdir_api::verify(&sid, &store, &snapdir_api::VerifyOptions::default()).await;
     api_result(result).map(|r| VerifyResult { ok: r.ok })
 }

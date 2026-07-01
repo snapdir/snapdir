@@ -46,8 +46,8 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -155,12 +155,7 @@ fn api_raw_normalized(raw: &str) -> String {
 /// Asserts byte-for-byte manifest parity between the API and the oracle binary for
 /// `fixture` under `opts`/`cli_args`. `cli_args` are the extra flags appended after
 /// `manifest` (e.g. `["--absolute"]`); they MUST express the same options as `opts`.
-fn assert_manifest_parity(
-    label: &str,
-    fixture: &Path,
-    opts: &ManifestOptions,
-    cli_args: &[&str],
-) {
+fn assert_manifest_parity(label: &str, fixture: &Path, opts: &ManifestOptions, cli_args: &[&str]) {
     let fixture_str = fixture.to_string_lossy().into_owned();
     let mut args = vec!["manifest"];
     args.extend_from_slice(cli_args);
@@ -225,7 +220,9 @@ fn assert_id_parity(label: &str, fixture: &Path, opts: &ManifestOptions, cli_arg
     let oracle_id = oracle_id_raw.trim_end();
     assert_eq!(oracle_id.len(), 64, "[{label}] oracle id is 64 hex chars");
     assert!(
-        oracle_id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        oracle_id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "[{label}] oracle id must be lowercase hex, got {oracle_id:?}"
     );
 
@@ -430,9 +427,18 @@ fn parity_mixed_permissions() {
     // Belt-and-suspenders: assert the distinct octal perms actually surfaced (proves
     // the fixture exercised the perm column, not just that two equal blobs matched).
     let oracle = oracle_stdout(&["manifest", &root.to_string_lossy()], &[]);
-    assert!(oracle.contains(" 600 "), "expected a 0600 entry in {oracle}");
-    assert!(oracle.contains(" 755 "), "expected a 0755 entry in {oracle}");
-    assert!(oracle.contains(" 700 "), "expected the 0700 dir in {oracle}");
+    assert!(
+        oracle.contains(" 600 "),
+        "expected a 0600 entry in {oracle}"
+    );
+    assert!(
+        oracle.contains(" 755 "),
+        "expected a 0755 entry in {oracle}"
+    );
+    assert!(
+        oracle.contains(" 700 "),
+        "expected the 0700 dir in {oracle}"
+    );
     fs::remove_dir_all(&root).ok();
 }
 
@@ -486,7 +492,10 @@ fn parity_manifest_exclude() {
 
     // The excluded subtree must be gone on BOTH sides.
     let api = snapdir_api::manifest(&root, &opts).unwrap();
-    assert!(!api.raw.contains("/sub/"), "api manifest must exclude ./sub/");
+    assert!(
+        !api.raw.contains("/sub/"),
+        "api manifest must exclude ./sub/"
+    );
     fs::remove_dir_all(&root).ok();
 }
 
@@ -705,10 +714,19 @@ fn parity_manifest_multi_exclude_patterns() {
 
     // Both excluded targets gone on the api side; the kept ones survive.
     let api = snapdir_api::manifest(&root, &opts).unwrap();
-    assert!(!api.raw.contains("/build/"), "api must exclude ./build/ subtree");
-    assert!(!api.raw.contains("notes.log"), "api must exclude ./notes.log");
+    assert!(
+        !api.raw.contains("/build/"),
+        "api must exclude ./build/ subtree"
+    );
+    assert!(
+        !api.raw.contains("notes.log"),
+        "api must exclude ./notes.log"
+    );
     assert!(api.raw.contains("keep.txt"), "api must keep ./keep.txt");
-    assert!(api.raw.contains("x.tmp"), "non-matching ./cache/x.tmp must survive");
+    assert!(
+        api.raw.contains("x.tmp"),
+        "non-matching ./cache/x.tmp must survive"
+    );
     fs::remove_dir_all(&root).ok();
 }
 
@@ -769,10 +787,16 @@ fn parity_absolute_and_exclude_combined_roundtrip() {
 
     // Explicit, standalone round-trip assertion for the non-default combo.
     let m = snapdir_api::manifest(&root, &opts).unwrap();
-    let manifest_args = ["manifest", "--absolute", "--exclude", "drop", &root.to_string_lossy().into_owned()]
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>();
+    let manifest_args = [
+        "manifest",
+        "--absolute",
+        "--exclude",
+        "drop",
+        &root.to_string_lossy().into_owned(),
+    ]
+    .iter()
+    .map(std::string::ToString::to_string)
+    .collect::<Vec<_>>();
     let manifest_arg_refs: Vec<&str> = manifest_args.iter().map(String::as_str).collect();
     let oracle_manifest = oracle_stdout(&manifest_arg_refs, &[]);
     let oracle_id = oracle_id_from_manifest_text(&oracle_manifest);
@@ -781,7 +805,10 @@ fn parity_absolute_and_exclude_combined_roundtrip() {
         oracle_id.trim_end(),
         "id_from_manifest must equal `manifest --absolute --exclude drop | id`"
     );
-    assert!(!m.raw.contains("/drop/"), "api manifest must exclude ./drop/");
+    assert!(
+        !m.raw.contains("/drop/"),
+        "api manifest must exclude ./drop/"
+    );
     assert!(m.raw.contains("/keep/"), "api manifest must keep ./keep/");
     fs::remove_dir_all(&root).ok();
 }
@@ -865,11 +892,7 @@ fn api_status_letter(s: &snapdir_api::DiffStatus) -> char {
 
 /// Pushes `leaves` into a FRESH `file://` manifest store, returning
 /// `(store_dir, store_url, snapshot_id)`. Each store holds exactly ONE manifest.
-fn capture(
-    tag: &str,
-    cache: &Path,
-    leaves: &[(&str, &[u8], u32)],
-) -> (PathBuf, String, String) {
+fn capture(tag: &str, cache: &Path, leaves: &[(&str, &[u8], u32)]) -> (PathBuf, String, String) {
     let src = temp_dir(&format!("{tag}-src"));
     let store = temp_dir(&format!("{tag}-store"));
     for (rel, bytes, mode) in leaves {
@@ -1120,7 +1143,9 @@ fn parity_diff_all_includes_unchanged() {
 
     // Each store holds exactly one manifest; no --id pin needed (union == pin).
     let oracle = oracle_stdout(
-        &["diff", "--json", "--all", "--from", &from_url, "--to", &to_url],
+        &[
+            "diff", "--json", "--all", "--from", &from_url, "--to", &to_url,
+        ],
         &[("SNAPDIR_CACHE_DIR", &cache.to_string_lossy())],
     );
     let oracle_set: BTreeSet<(char, String)> = parse_diff_json(&oracle).into_iter().collect();

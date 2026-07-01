@@ -69,6 +69,17 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
+      # Zig 0.13.0 is not pre-installed on ubuntu-latest runners — install
+      # it here. mlugg/setup-zig@v2 downloads the exact release tarball and
+      # adds zig to PATH; it also works transparently under act (the image
+      # already has zig 0.13 baked in, so the install is a no-op there).
+      # ------------------------------------------------------------------
+      - name: Set up Zig 0.13.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      # ------------------------------------------------------------------
       # Step 1: Build FFI staticlib (release — the Zig binding links .a)
       # ------------------------------------------------------------------
       - name: Build snapdir-ffi (release staticlib)
@@ -140,25 +151,6 @@ jobs:
           echo "parity: FAILED after 3 attempts" >&2
           exit 1
 
-  # --------------------------------------------------------------------------
-  # deferred: Windows + cross-arch legs + ReleaseSafe test (intentionally
-  # disabled).
-  #
-  # Windows / macOS / cross-arch legs are deferred to credited release CI —
-  # act is linux/arm64-only and cannot run these environments. The ReleaseSafe
-  # TEST step (zig build test -Doptimize=ReleaseSafe) hangs under qemu
-  # amd64-emulated; deferred to credited CI where zig runs on native aarch64.
-  # Remove `if: false` and implement when GH credits are restored and these
-  # environments are available.
-  # --------------------------------------------------------------------------
-  deferred-windows-cross:
-    name: Windows + cross-arch + ReleaseSafe-test (deferred)
-    runs-on: ubuntu-latest
-    if: false
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Windows / macOS / cross-arch legs (deferred)
-        run: echo "Windows/macOS/cross-arch legs — deferred to credited release CI (act is linux/arm64-only)."
-      - name: ReleaseSafe test step (deferred)
-        run: echo "zig build test -Doptimize=ReleaseSafe — deferred to credited CI (hangs under qemu amd64-emulated)."
+  # DEFERRED (not implemented here): Windows / macOS / cross-arch legs and
+  # ReleaseSafe test step (hangs under qemu amd64-emulated).
+  # Re-implement in credited release CI on native aarch64 runners.

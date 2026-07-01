@@ -42,7 +42,11 @@ use snapdir_api::{
 #[test]
 fn checksum_bin_variants_and_default() {
     // All three variants must exist and be distinct.
-    let all = [ChecksumBin::B3sum, ChecksumBin::Md5sum, ChecksumBin::Sha256sum];
+    let all = [
+        ChecksumBin::B3sum,
+        ChecksumBin::Md5sum,
+        ChecksumBin::Sha256sum,
+    ];
     assert_eq!(all[0], ChecksumBin::B3sum);
     assert_eq!(all[1], ChecksumBin::Md5sum);
     assert_eq!(all[2], ChecksumBin::Sha256sum);
@@ -64,7 +68,10 @@ fn catalog_option_variants_and_default() {
     assert_eq!(n, CatalogOption::None);
     assert_eq!(named, CatalogOption::Named("prod".to_string()));
     assert_ne!(CatalogOption::Default, CatalogOption::None);
-    assert_ne!(CatalogOption::Default, CatalogOption::Named("prod".to_string()));
+    assert_ne!(
+        CatalogOption::Default,
+        CatalogOption::Named("prod".to_string())
+    );
     assert_ne!(
         CatalogOption::Named("a".to_string()),
         CatalogOption::Named("b".to_string())
@@ -93,9 +100,15 @@ fn conflict_policy_variants_and_default() {
 fn manifest_options_default_values() {
     let m = ManifestOptions::default();
     // cli.rs:563-564 `absolute: bool` (no default => false)
-    assert!(!m.absolute, "ManifestOptions::default().absolute must be false");
+    assert!(
+        !m.absolute,
+        "ManifestOptions::default().absolute must be false"
+    );
     // cli.rs:567-568 `no_follow: bool` (no default => false)
-    assert!(!m.no_follow, "ManifestOptions::default().no_follow must be false");
+    assert!(
+        !m.no_follow,
+        "ManifestOptions::default().no_follow must be false"
+    );
     // cli.rs:570 checksum default b3sum
     assert_eq!(
         m.checksum_bin,
@@ -107,7 +120,11 @@ fn manifest_options_default_values() {
     // cli.rs:588 `walk_jobs: Option<usize>` env SNAPDIR_WALK_JOBS, no default => None
     assert_eq!(m.walk_jobs, None, "default walk_jobs must be None");
     // §5 catalog:CatalogOption => Default (cli.rs:595 catalog Option<String> None)
-    assert_eq!(m.catalog, CatalogOption::Default, "default catalog must be Default");
+    assert_eq!(
+        m.catalog,
+        CatalogOption::Default,
+        "default catalog must be Default"
+    );
     // §5 cache_dir:Option<PathBuf> => None (cli.rs:177 cache_dir Option<PathBuf> None)
     assert_eq!(m.cache_dir, None, "default cache_dir must be None");
 }
@@ -148,7 +165,11 @@ fn transfer_options_default_all_none() {
     assert_eq!(t.store, None, "default store None");
     assert_eq!(t.objects_store, None, "default objects_store None");
     assert_eq!(t.cache_dir, None, "default cache_dir None");
-    assert_eq!(t.catalog, CatalogOption::Default, "default catalog == Default");
+    assert_eq!(
+        t.catalog,
+        CatalogOption::Default,
+        "default catalog == Default"
+    );
     assert_eq!(t.jobs, None, "default jobs None");
     assert_eq!(t.limit_rate, None, "default limit_rate None");
     assert_eq!(t.adaptive, None, "default adaptive None (opt-in)");
@@ -197,8 +218,14 @@ fn checkout_options_default_values() {
     assert!(!co.delete, "default delete false");
     assert!(co.exclude.is_empty(), "default exclude empty");
     // embedded transfer must itself be the all-None default
-    assert_eq!(co.transfer.store, None, "embedded transfer.store default None");
-    assert_eq!(co.transfer.jobs, None, "embedded transfer.jobs default None");
+    assert_eq!(
+        co.transfer.store, None,
+        "embedded transfer.store default None"
+    );
+    assert_eq!(
+        co.transfer.jobs, None,
+        "embedded transfer.jobs default None"
+    );
     assert_eq!(co.transfer.catalog, CatalogOption::Default);
 }
 
@@ -218,7 +245,10 @@ fn checkout_options_embeds_transfer_options() {
         ..Default::default()
     };
     // The embedded TransferOptions is reachable and typed as TransferOptions.
-    assert_eq!(co.transfer.store.as_ref().map(StoreUri::scheme), Some("file"));
+    assert_eq!(
+        co.transfer.store.as_ref().map(StoreUri::scheme),
+        Some("file")
+    );
     assert_eq!(co.transfer.jobs, Some(2));
     assert!(co.linked);
     assert!(co.delete);
@@ -454,19 +484,46 @@ fn enums_are_non_exhaustive_require_wildcard_arm() {
 #[test]
 fn option_structs_are_not_non_exhaustive_external_struct_literal() {
     // Structs with fields — set one field + `..Default::default()` (E0639 tripwire each).
-    let _m = ManifestOptions { absolute: true, ..Default::default() };
-    let _t = TransferOptions { jobs: Some(1), ..Default::default() };
-    let _co = CheckoutOptions { force: true, ..Default::default() };
-    let _d = DiffOptions { all: true, ..Default::default() };
-    let _v = VerifyOptions { purge: true, ..Default::default() };
+    let _m = ManifestOptions {
+        absolute: true,
+        ..Default::default()
+    };
+    let _t = TransferOptions {
+        jobs: Some(1),
+        ..Default::default()
+    };
+    let _co = CheckoutOptions {
+        force: true,
+        ..Default::default()
+    };
+    let _d = DiffOptions {
+        all: true,
+        ..Default::default()
+    };
+    let _v = VerifyOptions {
+        purge: true,
+        ..Default::default()
+    };
     // Marker structs (no fields yet) — a bare external struct literal still proves NOT
     // #[non_exhaustive] (E0639 would reject even `Foo { ..Default::default() }` if it were).
-    let _s = StageOptions { ..Default::default() };
-    let _vc = VerifyCacheOptions { ..Default::default() };
-    let _c = CacheOptions { ..Default::default() };
-    let _l = LocationsOptions { ..Default::default() };
-    let _a = AncestorsOptions { ..Default::default() };
-    let _r = RevisionsOptions { ..Default::default() };
+    let _s = StageOptions {
+        ..Default::default()
+    };
+    let _vc = VerifyCacheOptions {
+        ..Default::default()
+    };
+    let _c = CacheOptions {
+        ..Default::default()
+    };
+    let _l = LocationsOptions {
+        ..Default::default()
+    };
+    let _a = AncestorsOptions {
+        ..Default::default()
+    };
+    let _r = RevisionsOptions {
+        ..Default::default()
+    };
     assert!(_m.absolute && _t.jobs == Some(1) && _co.force && _d.all && _v.purge);
 }
 
@@ -534,12 +591,27 @@ fn option_struct_fields_are_pub_for_forward_compat() {
 #[test]
 fn transfer_retry_knobs_default_none_not_resolved_values() {
     let t = TransferOptions::default();
-    assert_eq!(t.max_retries, None, "retry default is None sentinel, NOT Some(5)");
-    assert_eq!(t.retry_base_ms, None, "retry_base default None, NOT Some(250)");
-    assert_eq!(t.retry_max_ms, None, "retry_max default None, NOT Some(30_000)");
-    assert_eq!(t.max_requests, None, "max_requests default None (per-backend), NOT Some(_)");
+    assert_eq!(
+        t.max_retries, None,
+        "retry default is None sentinel, NOT Some(5)"
+    );
+    assert_eq!(
+        t.retry_base_ms, None,
+        "retry_base default None, NOT Some(250)"
+    );
+    assert_eq!(
+        t.retry_max_ms, None,
+        "retry_max default None, NOT Some(30_000)"
+    );
+    assert_eq!(
+        t.max_requests, None,
+        "max_requests default None (per-backend), NOT Some(_)"
+    );
     // The adaptive politeness fraction is opt-in: default None == full speed, not Some(1.0).
-    assert_eq!(t.adaptive, None, "adaptive default None (full speed), NOT Some(1.0)");
+    assert_eq!(
+        t.adaptive, None,
+        "adaptive default None (full speed), NOT Some(1.0)"
+    );
 }
 
 // PIN (review): embedded TransferOptions defaults reach all the way down. Now that the impl is

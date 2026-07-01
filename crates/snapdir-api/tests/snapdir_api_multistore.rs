@@ -27,8 +27,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use snapdir_api::{self as api, CheckoutOptions, ManifestOptions, PushSource, SnapshotId, StoreUri,
-                  TransferOptions};
+use snapdir_api::{
+    self as api, CheckoutOptions, ManifestOptions, PushSource, SnapshotId, StoreUri,
+    TransferOptions,
+};
 use snapdir_core::manifest::PathType;
 use snapdir_core::store::Store; // get_manifest
 use snapdir_stores::stream::StreamStore; // has_object
@@ -113,7 +115,9 @@ fn push_isolated(src: &Path, uri: &StoreUri, secs: u64) -> (Option<SnapshotId>, 
         .build()
         .expect("build runtime");
 
-    let guard = CWD_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = CWD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let prev = std::env::current_dir().expect("read cwd");
     std::env::set_current_dir(work.path()).expect("chdir into isolated work dir");
     let outcome = rt.block_on(async {
@@ -291,7 +295,10 @@ fn s3_round_trip_uses_real_store_not_local_filestore() {
     );
     let pushed = pushed.expect("push to s3 must succeed against minio");
     assert!(is_hex64(&pushed.to_hex()), "push must return a 64-hex id");
-    assert_eq!(pushed, local_id, "pushed id must equal the locally computed id");
+    assert_eq!(
+        pushed, local_id,
+        "pushed id must equal the locally computed id"
+    );
 
     // The objects + manifest must actually be in the bucket (the core bug check).
     let verify = S3Store::connect(&uri_str, Some(&env.endpoint)).expect("connect verify S3Store");
@@ -301,7 +308,12 @@ fn s3_round_trip_uses_real_store_not_local_filestore() {
     block(api::fetch(&local_id, &uri, &TransferOptions::default())).expect("fetch from s3");
     let co_dir = tempfile::tempdir().expect("checkout tempdir");
     let co_dest = co_dir.path().join("out");
-    block(api::checkout(&local_id, &co_dest, &CheckoutOptions::default())).expect("checkout");
+    block(api::checkout(
+        &local_id,
+        &co_dest,
+        &CheckoutOptions::default(),
+    ))
+    .expect("checkout");
     let co_id = api::id(&co_dest, &ManifestOptions::default()).expect("re-id checkout dest");
     assert_eq!(
         co_id, local_id,
@@ -380,7 +392,12 @@ fn b2_round_trip_uses_real_store_not_local_filestore() {
     block(api::fetch(&local_id, &uri, &TransferOptions::default())).expect("fetch from b2");
     let co_dir = tempfile::tempdir().expect("checkout tempdir");
     let co_dest = co_dir.path().join("out");
-    block(api::checkout(&local_id, &co_dest, &CheckoutOptions::default())).expect("checkout");
+    block(api::checkout(
+        &local_id,
+        &co_dest,
+        &CheckoutOptions::default(),
+    ))
+    .expect("checkout");
     let co_id = api::id(&co_dest, &ManifestOptions::default()).expect("re-id checkout dest");
     assert_eq!(
         co_id, local_id,

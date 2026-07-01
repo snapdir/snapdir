@@ -14,14 +14,37 @@ use std::path::{Path, PathBuf};
 
 use snapdir_api::{
     // §3 types
-    Ancestor, DiffEntry, DiffStatus, EffectiveConfig, Location, Manifest, ManifestEntry,
-    PathType, PushSource, Revision, SnapdirError, SnapshotId, StoreUri, VerifyCacheResult,
-    VerifyResult,
+    Ancestor,
     // §5 option structs + enums
-    AncestorsOptions, CacheOptions, CatalogOption, CheckoutOptions, ChecksumBin, ConflictPolicy,
-    DiffOptions, LocationsOptions, ManifestOptions, RevisionsOptions, StageOptions,
-    TransferOptions, VerifyCacheOptions, VerifyOptions,
+    AncestorsOptions,
+    CacheOptions,
+    CatalogOption,
+    CheckoutOptions,
+    ChecksumBin,
+    ConflictPolicy,
+    DiffEntry,
+    DiffOptions,
+    DiffStatus,
+    EffectiveConfig,
+    Location,
+    LocationsOptions,
+    Manifest,
+    ManifestEntry,
+    ManifestOptions,
+    PathType,
+    PushSource,
+    Revision,
+    RevisionsOptions,
+    SnapdirError,
+    SnapshotId,
+    StageOptions,
+    StoreUri,
+    TransferOptions,
+    VerifyCacheOptions,
+    VerifyCacheResult,
+    VerifyOptions,
     // free functions are referenced fully-qualified as snapdir_api::* below.
+    VerifyResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +72,9 @@ fn file_store() -> (tempfile::TempDir, StoreUri) {
 }
 
 fn is_64_lower_hex(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == 64
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 // ===========================================================================
@@ -62,9 +87,16 @@ fn snapshot_id_is_64_char_lowercase_hex_roundtrip() {
     let hex = "a".repeat(64);
     let id: SnapshotId = SnapshotId::from_hex(&hex).expect("valid 64-hex parses");
     assert_eq!(id.to_hex(), hex, "to_hex round-trips from_hex");
-    assert!(is_64_lower_hex(&id.to_hex()), "to_hex is 64-char lowercase hex");
+    assert!(
+        is_64_lower_hex(&id.to_hex()),
+        "to_hex is 64-char lowercase hex"
+    );
     assert_eq!(id.as_bytes().len(), 32, "as_bytes is &[u8;32]");
-    assert_eq!(id.as_bytes(), &[0xaau8; 32], "0xaa repeated decodes correctly");
+    assert_eq!(
+        id.as_bytes(),
+        &[0xaau8; 32],
+        "0xaa repeated decodes correctly"
+    );
 
     // Display == hex; FromStr == from_hex.
     assert_eq!(format!("{id}"), hex, "Display renders 64-hex");
@@ -112,9 +144,16 @@ fn store_uri_parses_known_schemes_and_rejects_unknown() {
         ("sftp://host/p", "sftp"),
     ] {
         let parsed = StoreUri::parse(uri).unwrap_or_else(|_| panic!("{uri} should parse"));
-        assert_eq!(parsed.scheme(), scheme, "scheme() reports the right scheme for {uri}");
+        assert_eq!(
+            parsed.scheme(),
+            scheme,
+            "scheme() reports the right scheme for {uri}"
+        );
         // Display round-trips (per §3 "Display round-trips").
-        assert!(format!("{parsed}").contains(scheme), "Display retains scheme for {uri}");
+        assert!(
+            format!("{parsed}").contains(scheme),
+            "Display retains scheme for {uri}"
+        );
     }
 
     let bad: Result<StoreUri, SnapdirError> = StoreUri::parse("wat://nope");
@@ -181,7 +220,11 @@ fn option_structs_are_default_constructible() {
 #[test]
 fn option_enums_have_spec_named_variants_and_defaults() {
     // §5: ChecksumBin{B3sum,Md5sum,Sha256sum}; CatalogOption{Default,None,Named}; ConflictPolicy{Error,LastWins}.
-    let _ = [ChecksumBin::B3sum, ChecksumBin::Md5sum, ChecksumBin::Sha256sum];
+    let _ = [
+        ChecksumBin::B3sum,
+        ChecksumBin::Md5sum,
+        ChecksumBin::Sha256sum,
+    ];
     let _ = [
         CatalogOption::Default,
         CatalogOption::None,
@@ -211,9 +254,15 @@ fn manifest_returns_entries_for_a_real_tree() {
     let (_g, root) = fixture_tree();
     let o = ManifestOptions::default();
     let m: Manifest = snapdir_api::manifest(root.as_path(), &o).expect("manifest of a real tree");
-    assert!(!m.entries.is_empty(), "manifest has entries for a non-empty tree");
+    assert!(
+        !m.entries.is_empty(),
+        "manifest has entries for a non-empty tree"
+    );
     // §3: Manifest{entries:Vec<ManifestEntry>, raw:String}; raw kept for round-trip.
-    assert!(!m.raw.is_empty(), "manifest keeps its raw text for round-trip");
+    assert!(
+        !m.raw.is_empty(),
+        "manifest keeps its raw text for round-trip"
+    );
     // ManifestEntry shape is reachable (path_type/path fields used).
     let entry: &ManifestEntry = m.entries.first().unwrap();
     let _pt: &PathType = &entry.path_type;
@@ -226,7 +275,10 @@ fn id_is_a_64_hex_snapshot_id() {
     let (_g, root) = fixture_tree();
     let o = ManifestOptions::default();
     let id: SnapshotId = snapdir_api::id(root.as_path(), &o).expect("id of a real tree");
-    assert!(is_64_lower_hex(&id.to_hex()), "id() yields a 64-hex SnapshotId");
+    assert!(
+        is_64_lower_hex(&id.to_hex()),
+        "id() yields a 64-hex SnapshotId"
+    );
 }
 
 #[test]
@@ -257,12 +309,25 @@ fn id_is_deterministic_across_runs() {
 fn stage_returns_the_same_id_as_id() {
     // §6: pub fn stage(path:&Path, o:&StageOptions) -> Result<SnapshotId>.
     // Staging computes + records the snapshot; the returned id must equal id()'s.
+    // Hermetic isolation: stage into a per-test cache dir (honored by stage()),
+    // never the shared global cache ($HOME/.cache/snapdir), so parallel tests
+    // can't race on it.
     let (_g, root) = fixture_tree();
-    let staged: SnapshotId =
-        snapdir_api::stage(root.as_path(), &StageOptions::default()).expect("stage");
+    let cache_td = tempfile::tempdir().expect("cache tempdir");
+    let staged: SnapshotId = snapdir_api::stage(
+        root.as_path(),
+        &StageOptions {
+            cache_dir: Some(cache_td.path().into()),
+            ..Default::default()
+        },
+    )
+    .expect("stage");
     let computed: SnapshotId =
         snapdir_api::id(root.as_path(), &ManifestOptions::default()).expect("id");
-    assert_eq!(staged, computed, "stage() returns the same SnapshotId as id()");
+    assert_eq!(
+        staged, computed,
+        "stage() returns the same SnapshotId as id()"
+    );
 }
 
 // ===========================================================================
@@ -280,7 +345,10 @@ async fn push_returns_a_snapshot_id_into_a_file_store() {
         .expect("push a real dir to a file:// store");
     // Must equal the locally-computed id (push is content-addressed, not a new id).
     let local = snapdir_api::id(root.as_path(), &ManifestOptions::default()).expect("id");
-    assert_eq!(pushed, local, "push returns the content-addressed SnapshotId");
+    assert_eq!(
+        pushed, local,
+        "push returns the content-addressed SnapshotId"
+    );
 }
 
 #[tokio::test]
@@ -302,22 +370,40 @@ async fn fetch_pull_checkout_round_trip_reproduces_the_tree() {
     //     pull(id,store,dest,o)->Result<()>. Drive a full file:// round-trip.
     let (_gtree, root) = fixture_tree();
     let (_gstore, store) = file_store();
-    let to = TransferOptions::default();
+    // Hermetic cache: thread one per-test cache dir through every transfer +
+    // checkout option so fetch writes and checkout reads the SAME private cache
+    // instead of the shared global $HOME/.cache/snapdir.
+    let cache_td = tempfile::tempdir().expect("cache tempdir");
+    let to = TransferOptions {
+        cache_dir: Some(cache_td.path().into()),
+        ..Default::default()
+    };
     let id = snapdir_api::push(PushSource::Path(root.as_path()), &store, &to)
         .await
         .expect("push");
 
     // fetch: pull objects into the local cache; returns Result<()>.
-    snapdir_api::fetch(&id, &store, &to).await.expect("fetch objects from file:// store");
+    snapdir_api::fetch(&id, &store, &to)
+        .await
+        .expect("fetch objects from file:// store");
 
     // pull = fetch + checkout in one call into a fresh dest.
     let dest_pull = tempfile::tempdir().expect("dest pull");
-    let co = CheckoutOptions::default();
+    let co = CheckoutOptions {
+        transfer: TransferOptions {
+            cache_dir: Some(cache_td.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     snapdir_api::pull(&id, &store, dest_pull.path(), &co)
         .await
         .expect("pull into a fresh dir");
     let reid_pull = snapdir_api::id(dest_pull.path(), &ManifestOptions::default()).expect("re-id");
-    assert_eq!(reid_pull, id, "pull reproduces the tree byte-for-byte (same id)");
+    assert_eq!(
+        reid_pull, id,
+        "pull reproduces the tree byte-for-byte (same id)"
+    );
 
     // checkout: materialize from the already-fetched cache into another fresh dest.
     let dest_checkout = tempfile::tempdir().expect("dest checkout");
@@ -326,7 +412,10 @@ async fn fetch_pull_checkout_round_trip_reproduces_the_tree() {
         .expect("checkout from cache");
     let reid_checkout =
         snapdir_api::id(dest_checkout.path(), &ManifestOptions::default()).expect("re-id");
-    assert_eq!(reid_checkout, id, "checkout reproduces the same id as the source");
+    assert_eq!(
+        reid_checkout, id,
+        "checkout reproduces the same id as the source"
+    );
 }
 
 #[tokio::test]
@@ -339,7 +428,9 @@ async fn sync_copies_a_snapshot_between_two_file_stores() {
     let id = snapdir_api::push(PushSource::Path(root.as_path()), &src, &to)
         .await
         .expect("push to src");
-    snapdir_api::sync(&id, &src, &dst, &to).await.expect("sync src -> dst");
+    snapdir_api::sync(&id, &src, &dst, &to)
+        .await
+        .expect("sync src -> dst");
 
     // After sync the snapshot must be checkout-able straight from dst.
     let dest = tempfile::tempdir().expect("dest");
@@ -392,11 +483,16 @@ async fn diff_returns_structured_diff_entries() {
     };
     let entries: Vec<DiffEntry> = snapdir_api::diff(&opts).await.expect("diff two stores");
     // The mutated/added files must surface as structured entries with a DiffStatus + path.
-    assert!(!entries.is_empty(), "diff of differing trees yields entries");
+    assert!(
+        !entries.is_empty(),
+        "diff of differing trees yields entries"
+    );
     let _statuses: Vec<&DiffStatus> = entries.iter().map(|e| &e.status).collect();
     let paths: Vec<&PathBuf> = entries.iter().map(|e| &e.path).collect();
     assert!(
-        paths.iter().any(|p| p.ends_with("a.txt") || p.ends_with("new.txt")),
+        paths
+            .iter()
+            .any(|p| p.ends_with("a.txt") || p.ends_with("new.txt")),
         "diff surfaces the changed/added path(s)"
     );
 }
@@ -408,8 +504,14 @@ async fn diff_returns_structured_diff_entries() {
 #[test]
 fn verify_cache_returns_a_verify_cache_result() {
     // §6: pub fn verify_cache(o:&VerifyCacheOptions) -> Result<VerifyCacheResult>.
-    let res: VerifyCacheResult =
-        snapdir_api::verify_cache(&VerifyCacheOptions::default()).expect("verify_cache");
+    // Hermetic isolation: verify a per-test cache dir (honored by verify_cache()),
+    // never the shared global cache, so a concurrent flush/stage in another test
+    // can't perturb it.
+    let cache_td = tempfile::tempdir().expect("cache tempdir");
+    let res: VerifyCacheResult = snapdir_api::verify_cache(&VerifyCacheOptions {
+        cache_dir: Some(cache_td.path().into()),
+    })
+    .expect("verify_cache");
     // §3: VerifyCacheResult{ pub ok: bool, ... } — an empty/fresh cache verifies ok.
     let _ok: bool = res.ok;
 }
@@ -417,7 +519,16 @@ fn verify_cache_returns_a_verify_cache_result() {
 #[test]
 fn flush_cache_returns_unit_result() {
     // §6: pub fn flush_cache(o:&CacheOptions) -> Result<()>.
-    let r: Result<(), SnapdirError> = snapdir_api::flush_cache(&CacheOptions::default());
+    // Hermetic isolation (CRITICAL — this was the relfix-test-cache-isolation
+    // race): flush a per-test cache dir, NOT the shared global cache.
+    // flush_cache(default) rm-rf's $HOME/.cache/snapdir, which under parallel
+    // execution wipes the objects/manifest another test just fetched/staged ->
+    // StoreError(ManifestNotFound) at its checkout/push. Pointing flush at a
+    // private tempdir (honored by flush_cache()) removes the destructive race.
+    let cache_td = tempfile::tempdir().expect("cache tempdir");
+    let r: Result<(), SnapdirError> = snapdir_api::flush_cache(&CacheOptions {
+        cache_dir: Some(cache_td.path().into()),
+    });
     r.expect("flush_cache on a (possibly empty) cache succeeds");
 }
 
@@ -464,7 +575,10 @@ fn version_is_a_non_empty_static_str() {
     let v: &'static str = snapdir_api::version();
     assert!(!v.is_empty(), "version() returns a non-empty string");
     // Must look like a semver (at least one dot), since it tracks the CLI version.
-    assert!(v.contains('.'), "version() looks like a semver string: {v:?}");
+    assert!(
+        v.contains('.'),
+        "version() looks like a semver string: {v:?}"
+    );
 }
 
 #[test]
@@ -541,12 +655,23 @@ fn populated_catalog() -> (tempfile::TempDir, PathBuf) {
     // unfiltered ancestors(C) returns one row per location (2 rows); the
     // s3://bar filter narrows it to the single bar row (prev A).
     let anc = cat.ancestors(CAT_C, None).expect("catalog.ancestors");
-    assert_eq!(anc.len(), 2, "C has an ancestor row at each of its 2 locations");
+    assert_eq!(
+        anc.len(),
+        2,
+        "C has an ancestor row at each of its 2 locations"
+    );
     let anc_bar = cat
         .ancestors(CAT_C, Some("s3://bar"))
         .expect("catalog.ancestors bar");
-    assert_eq!(anc_bar.len(), 1, "C@s3://bar has exactly one ancestor row (prev A)");
-    assert_eq!(anc_bar[0].id, CAT_A, "C@s3://bar ancestor id is previous_id A");
+    assert_eq!(
+        anc_bar.len(),
+        1,
+        "C@s3://bar has exactly one ancestor row (prev A)"
+    );
+    assert_eq!(
+        anc_bar[0].id, CAT_A,
+        "C@s3://bar ancestor id is previous_id A"
+    );
 
     (td, db_path)
 }
@@ -621,12 +746,18 @@ fn ancestors_reads_a_real_populated_catalog() {
         .iter()
         .find(|a| a.location == "s3://bar")
         .expect("s3://bar ancestor row present");
-    assert_eq!(bar.id, CAT_A, "the s3://bar C-ancestor's id is its previous_id (A)");
+    assert_eq!(
+        bar.id, CAT_A,
+        "the s3://bar C-ancestor's id is its previous_id (A)"
+    );
     let local = anc
         .iter()
         .find(|a| a.location == "/local/x")
         .expect("/local/x ancestor row present");
-    assert_eq!(local.id, CAT_B, "the /local/x C-ancestor's id is its previous_id (B)");
+    assert_eq!(
+        local.id, CAT_B,
+        "the /local/x C-ancestor's id is its previous_id (B)"
+    );
 
     // A root id (A) has no ancestors -> empty, but that empty must come from a
     // REAL catalog read, not the stub. We can only distinguish via the C case
@@ -654,11 +785,22 @@ fn revisions_reads_a_real_populated_catalog() {
     );
     // DESC: C (prev B), B (prev A), A (prev None/root).
     assert_eq!(revs[0].id, CAT_C, "newest revision is C");
-    assert_eq!(revs[0].previous_id.as_deref(), Some(CAT_B), "C's previous_id is B");
+    assert_eq!(
+        revs[0].previous_id.as_deref(),
+        Some(CAT_B),
+        "C's previous_id is B"
+    );
     assert_eq!(revs[1].id, CAT_B, "middle revision is B");
-    assert_eq!(revs[1].previous_id.as_deref(), Some(CAT_A), "B's previous_id is A");
+    assert_eq!(
+        revs[1].previous_id.as_deref(),
+        Some(CAT_A),
+        "B's previous_id is A"
+    );
     assert_eq!(revs[2].id, CAT_A, "oldest revision is A (root)");
-    assert_eq!(revs[2].previous_id, None, "the root revision has no previous_id");
+    assert_eq!(
+        revs[2].previous_id, None,
+        "the root revision has no previous_id"
+    );
 }
 
 // ===========================================================================
@@ -689,7 +831,10 @@ async fn push_path_and_staged_id_yield_the_same_content_addressed_id() {
         .await
         .expect("push via StagedId");
 
-    assert_eq!(via_path, via_staged, "Path and StagedId push yield the same id");
+    assert_eq!(
+        via_path, via_staged,
+        "Path and StagedId push yield the same id"
+    );
     assert_eq!(via_path, staged, "the pushed id equals the staged id");
 
     // Both stores now serve a verifiable snapshot of the same tree.
@@ -716,15 +861,30 @@ async fn checkout_materializes_exact_file_bytes() {
     // merely that the re-id matches.
     let (_gtree, root) = fixture_tree();
     let (_gstore, store) = file_store();
-    let to = TransferOptions::default();
+    // Hermetic cache: one per-test cache dir shared by fetch (writer) and
+    // checkout (reader), never the global $HOME/.cache/snapdir.
+    let cache_td = tempfile::tempdir().expect("cache tempdir");
+    let to = TransferOptions {
+        cache_dir: Some(cache_td.path().into()),
+        ..Default::default()
+    };
     let id = snapdir_api::push(PushSource::Path(root.as_path()), &store, &to)
         .await
         .expect("push");
     // checkout serves from the local cache, so fetch into the cache first.
-    snapdir_api::fetch(&id, &store, &to).await.expect("fetch into cache");
+    snapdir_api::fetch(&id, &store, &to)
+        .await
+        .expect("fetch into cache");
 
     let dest = tempfile::tempdir().expect("dest");
-    snapdir_api::checkout(&id, dest.path(), &CheckoutOptions::default())
+    let co = CheckoutOptions {
+        transfer: TransferOptions {
+            cache_dir: Some(cache_td.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    snapdir_api::checkout(&id, dest.path(), &co)
         .await
         .expect("checkout");
 
@@ -755,7 +915,9 @@ async fn sync_makes_the_id_fetchable_from_the_destination_store() {
         .await
         .expect("push to src");
 
-    snapdir_api::sync(&id, &src, &dst, &to).await.expect("sync src->dst");
+    snapdir_api::sync(&id, &src, &dst, &to)
+        .await
+        .expect("sync src->dst");
 
     // dst serves a healthy snapshot on its own.
     assert!(
@@ -770,7 +932,10 @@ async fn sync_makes_the_id_fetchable_from_the_destination_store() {
         .await
         .expect("pull from dst");
     let reid = snapdir_api::id(dest.path(), &ManifestOptions::default()).expect("re-id");
-    assert_eq!(reid, id, "the dst store serves the identical snapshot after sync");
+    assert_eq!(
+        reid, id,
+        "the dst store serves the identical snapshot after sync"
+    );
 }
 
 #[tokio::test]
@@ -812,9 +977,21 @@ async fn diff_classifies_added_deleted_modified_unchanged() {
             .find(|e| e.path.ends_with(name))
             .map(|e| e.status)
     };
-    assert_eq!(status_of("mod.txt"), Some(DiffStatus::Modified), "mod.txt is Modified");
-    assert_eq!(status_of("new.txt"), Some(DiffStatus::Added), "new.txt is Added");
-    assert_eq!(status_of("gone.txt"), Some(DiffStatus::Deleted), "gone.txt is Deleted");
+    assert_eq!(
+        status_of("mod.txt"),
+        Some(DiffStatus::Modified),
+        "mod.txt is Modified"
+    );
+    assert_eq!(
+        status_of("new.txt"),
+        Some(DiffStatus::Added),
+        "new.txt is Added"
+    );
+    assert_eq!(
+        status_of("gone.txt"),
+        Some(DiffStatus::Deleted),
+        "gone.txt is Deleted"
+    );
     assert_eq!(
         status_of("keep.txt"),
         None,
@@ -878,7 +1055,10 @@ async fn verify_ok_true_on_healthy_store_and_errors_on_corruption() {
             corrupted += 1;
         }
     }
-    assert!(corrupted > 0, "test must actually corrupt at least one object");
+    assert!(
+        corrupted > 0,
+        "test must actually corrupt at least one object"
+    );
 
     let result = snapdir_api::verify(&id, &store, &VerifyOptions::default()).await;
     match result {

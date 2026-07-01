@@ -54,8 +54,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use snapdir_api::{
-    DiffEntry, DiffStatus, Manifest, ManifestEntry, PathType, PushSource, SnapdirError,
-    SnapshotId, StoreUri,
+    DiffEntry, DiffStatus, Manifest, ManifestEntry, PathType, PushSource, SnapdirError, SnapshotId,
+    StoreUri,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,11 @@ const VALID_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456
 /// Convenience: assert the error is the InvalidId variant by its stable code.
 fn assert_invalid_id(err: &SnapdirError, ctx: &str) {
     // §3 line 42 / §4: bad hex/length -> SnapdirError::InvalidId, code "INVALID_ID".
-    assert_eq!(err.code(), "INVALID_ID", "expected INVALID_ID for {ctx}: {err}");
+    assert_eq!(
+        err.code(),
+        "INVALID_ID",
+        "expected INVALID_ID for {ctx}: {err}"
+    );
 }
 
 /// Convenience: assert the error is the InvalidStore variant by its stable code.
@@ -105,7 +109,9 @@ fn snapshot_id_display_equals_to_hex_and_is_64_lowercase_hex() {
     assert_eq!(shown, id.to_hex(), "Display must equal to_hex()");
     assert_eq!(shown.len(), 64, "Display is exactly 64 hex chars");
     assert!(
-        shown.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        shown
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
         "Display is LOWERCASE hex only (no uppercase, no separators): {shown}"
     );
 }
@@ -128,9 +134,15 @@ fn snapshot_id_as_bytes_len_32_and_matches_hex() {
     let bytes: &[u8; 32] = id.as_bytes();
     assert_eq!(bytes.len(), 32, "as_bytes is exactly 32 bytes");
     // First byte of "0123..." is 0x01, second 0x23, ... (pin the decode, not just len).
-    assert_eq!(bytes[0], 0x01, "first byte decodes the leading '01' nibble pair");
+    assert_eq!(
+        bytes[0], 0x01,
+        "first byte decodes the leading '01' nibble pair"
+    );
     assert_eq!(bytes[1], 0x23);
-    assert_eq!(bytes[31], 0xef, "last byte decodes the trailing 'ef' nibble pair");
+    assert_eq!(
+        bytes[31], 0xef,
+        "last byte decodes the trailing 'ef' nibble pair"
+    );
 }
 
 #[test]
@@ -188,7 +200,11 @@ fn snapshot_id_rejects_non_hex_chars() {
     let mut s: Vec<char> = VALID_HEX.chars().collect();
     s[10] = 'g';
     let bad: String = s.into_iter().collect();
-    assert_eq!(bad.len(), 64, "still 64 chars — only the char class is wrong");
+    assert_eq!(
+        bad.len(),
+        64,
+        "still 64 chars — only the char class is wrong"
+    );
     let err = SnapshotId::from_hex(&bad).expect_err("non-hex char must be rejected");
     assert_invalid_id(&err, "64-char with a non-hex 'g'");
 }
@@ -201,8 +217,8 @@ fn snapshot_id_rejects_whitespace_and_prefix() {
         format!("{VALID_HEX} "),
         format!("0x{}", &VALID_HEX[2..]), // "0x" prefix, still 64 chars
     ] {
-        let err = SnapshotId::from_hex(&bad)
-            .expect_err("whitespace/0x-prefixed input must be rejected");
+        let err =
+            SnapshotId::from_hex(&bad).expect_err("whitespace/0x-prefixed input must be rejected");
         assert_invalid_id(&err, &format!("non-bare-hex {bad:?}"));
     }
 }
@@ -215,13 +231,18 @@ fn snapshot_id_uppercase_input_emits_lowercase() {
     // LOWERCASE. If the impl instead REJECTS uppercase as InvalidId, this is the single
     // assertion the judge may flip per the documented ambiguity — NOT a weakening.
     let upper = VALID_HEX.to_uppercase();
-    let id = SnapshotId::from_hex(&upper).expect("FLAG F1: uppercase hex accepted (case-insensitive)");
+    let id =
+        SnapshotId::from_hex(&upper).expect("FLAG F1: uppercase hex accepted (case-insensitive)");
     assert_eq!(
         id.to_hex(),
         VALID_HEX.to_lowercase(),
         "FLAG F1: to_hex re-emits LOWERCASE regardless of input case"
     );
-    assert_eq!(format!("{id}"), VALID_HEX.to_lowercase(), "FLAG F1: Display is lowercase");
+    assert_eq!(
+        format!("{id}"),
+        VALID_HEX.to_lowercase(),
+        "FLAG F1: Display is lowercase"
+    );
     // The parsed value must equal the lowercase parse (same 32 bytes).
     assert_eq!(
         id,
@@ -246,7 +267,11 @@ fn snapshot_id_is_copy_eq_hash_and_works_as_map_key() {
     let mut map: HashMap<SnapshotId, u32> = HashMap::new();
     map.insert(a, 1);
     map.insert(other, 2);
-    assert_eq!(map.get(&b), Some(&1), "Copy key looks up the same entry (Hash+Eq)");
+    assert_eq!(
+        map.get(&b),
+        Some(&1),
+        "Copy key looks up the same entry (Hash+Eq)"
+    );
     assert_eq!(map.len(), 2, "two distinct ids -> two entries");
     // Re-inserting an equal key overwrites, proving Eq+Hash agreement.
     map.insert(c, 9);
@@ -280,7 +305,11 @@ fn store_uri_accepts_all_six_schemes_and_reports_scheme() {
     ];
     for (uri, scheme) in cases {
         let parsed = StoreUri::parse(uri).unwrap_or_else(|e| panic!("`{uri}` must parse: {e}"));
-        assert_eq!(parsed.scheme(), scheme, "`{uri}`.scheme() must be {scheme:?}");
+        assert_eq!(
+            parsed.scheme(),
+            scheme,
+            "`{uri}`.scheme() must be {scheme:?}"
+        );
     }
 }
 
@@ -303,7 +332,14 @@ fn store_uri_display_round_trips_the_input() {
 #[test]
 fn store_uri_rejects_unknown_schemes() {
     // §3 line 58: unknown scheme -> InvalidStore. http/https/ftp/file-typo/custom.
-    for uri in ["nope://x", "http://x", "https://x", "ftp://x", "fil://x", "gcs://x"] {
+    for uri in [
+        "nope://x",
+        "http://x",
+        "https://x",
+        "ftp://x",
+        "fil://x",
+        "gcs://x",
+    ] {
         let err = StoreUri::parse(uri).expect_err("unknown scheme must be rejected");
         assert_invalid_store(&err, uri);
     }
@@ -313,7 +349,14 @@ fn store_uri_rejects_unknown_schemes() {
 fn store_uri_rejects_scheme_without_separator_and_garbage() {
     // §3 line 55-58: a bare/malformed value with no `scheme://` is not a valid StoreUri
     // -> InvalidStore. (A relative path is NOT silently treated as file://.)
-    for uri in ["", "   ", "not-a-uri", "/tmp/store", "./relative", "file:/missing-slashes"] {
+    for uri in [
+        "",
+        "   ",
+        "not-a-uri",
+        "/tmp/store",
+        "./relative",
+        "file:/missing-slashes",
+    ] {
         let err = StoreUri::parse(uri).expect_err("malformed value must be rejected");
         assert_invalid_store(&err, uri);
     }
@@ -360,8 +403,16 @@ fn store_uri_parse_is_stable_idempotent() {
     let uri = "s3://bucket/prefix";
     let once = StoreUri::parse(uri).expect("parse");
     let twice = StoreUri::parse(&format!("{once}")).expect("re-parse of Display");
-    assert_eq!(once.scheme(), twice.scheme(), "scheme stable across re-parse");
-    assert_eq!(format!("{once}"), format!("{twice}"), "Display stable across re-parse");
+    assert_eq!(
+        once.scheme(),
+        twice.scheme(),
+        "scheme stable across re-parse"
+    );
+    assert_eq!(
+        format!("{once}"),
+        format!("{twice}"),
+        "Display stable across re-parse"
+    );
 }
 
 // ===========================================================================
@@ -400,7 +451,11 @@ fn diff_status_display_glyphs_are_exactly_a_d_m_eq() {
     assert_eq!(format!("{}", DiffStatus::Added), "A", "Added -> 'A'");
     assert_eq!(format!("{}", DiffStatus::Deleted), "D", "Deleted -> 'D'");
     assert_eq!(format!("{}", DiffStatus::Modified), "M", "Modified -> 'M'");
-    assert_eq!(format!("{}", DiffStatus::Unchanged), "=", "Unchanged -> '='");
+    assert_eq!(
+        format!("{}", DiffStatus::Unchanged),
+        "=",
+        "Unchanged -> '='"
+    );
 }
 
 #[test]
@@ -416,7 +471,11 @@ fn diff_status_glyphs_are_single_char_and_distinct() {
     .map(|s| format!("{s}"))
     .collect();
     for g in &glyphs {
-        assert_eq!(g.chars().count(), 1, "each DiffStatus glyph is a single char: {g:?}");
+        assert_eq!(
+            g.chars().count(),
+            1,
+            "each DiffStatus glyph is a single char: {g:?}"
+        );
     }
     let mut uniq = glyphs.clone();
     uniq.sort();
@@ -431,10 +490,21 @@ fn diff_entry_holds_status_and_pathbuf() {
         status: DiffStatus::Modified,
         path: PathBuf::from("./changed/file.txt"),
     };
-    assert_eq!(entry.status, DiffStatus::Modified, "status field is a DiffStatus");
-    assert_eq!(entry.path, PathBuf::from("./changed/file.txt"), "path field is a PathBuf");
+    assert_eq!(
+        entry.status,
+        DiffStatus::Modified,
+        "status field is a DiffStatus"
+    );
+    assert_eq!(
+        entry.path,
+        PathBuf::from("./changed/file.txt"),
+        "path field is a PathBuf"
+    );
     // The rendered status glyph + path is the diff line shape bindings format.
-    assert_eq!(format!("{} {}", entry.status, entry.path.display()), "M ./changed/file.txt");
+    assert_eq!(
+        format!("{} {}", entry.status, entry.path.display()),
+        "M ./changed/file.txt"
+    );
 }
 
 #[test]
@@ -464,7 +534,11 @@ fn pathtype_and_manifest_entry_are_reexported_and_usable() {
     // exact types/values). PathType variant identifier is FLAG F3.
     let file_pt: PathType = PathType::File; // FLAG F3: variant identifier per re-exported core
     assert_eq!(file_pt, PathType::File);
-    assert_ne!(PathType::File, PathType::Directory, "FLAG F3: File and Directory are distinct");
+    assert_ne!(
+        PathType::File,
+        PathType::Directory,
+        "FLAG F3: File and Directory are distinct"
+    );
 }
 
 #[test]
@@ -495,7 +569,7 @@ fn manifest_exposes_entries_and_raw_per_section3() {
     fn assert_shape(m: &Manifest) {
         let entries: &Vec<ManifestEntry> = &m.entries; // entries is a Vec<ManifestEntry>
         let raw: &String = &m.raw; // raw is a String kept for round-trip
-        // raw is the serialized form of entries: empty entries <-> trivially small raw.
+                                   // raw is the serialized form of entries: empty entries <-> trivially small raw.
         let _ = (entries.len(), raw.len());
     }
     let _f: fn(&Manifest) = assert_shape;
@@ -519,9 +593,16 @@ fn store_uri_scheme_without_double_slash_is_rejected() {
     // IMPL extract_scheme: after the scheme colon, the remainder MUST start with
     // "://". `file:` / `file:/x` / `file:x` all lack "://" -> InvalidStore.
     // (This is the exact bug that was fixed: bare/single-slash paths must reject.)
-    for uri in ["file:", "file:/x", "file:x", "file:/", "s3:bucket", "gs:/b/k"] {
-        let err = StoreUri::parse(uri)
-            .expect_err("scheme without '://' separator must be rejected");
+    for uri in [
+        "file:",
+        "file:/x",
+        "file:x",
+        "file:/",
+        "s3:bucket",
+        "gs:/b/k",
+    ] {
+        let err =
+            StoreUri::parse(uri).expect_err("scheme without '://' separator must be rejected");
         assert_invalid_store(&err, uri);
     }
 }
@@ -531,8 +612,16 @@ fn store_uri_empty_authority_is_accepted_when_scheme_known() {
     // IMPL extract_scheme: only "://" is required after the scheme — the authority
     // may be EMPTY. "file://" is `scheme="file"` + "://" + "" -> accepted.
     let parsed = StoreUri::parse("file://").expect("file:// (empty authority) parses");
-    assert_eq!(parsed.scheme(), "file", "scheme is 'file' even with empty authority");
-    assert_eq!(format!("{parsed}"), "file://", "Display round-trips the empty-authority form");
+    assert_eq!(
+        parsed.scheme(),
+        "file",
+        "scheme is 'file' even with empty authority"
+    );
+    assert_eq!(
+        format!("{parsed}"),
+        "file://",
+        "Display round-trips the empty-authority form"
+    );
 }
 
 #[test]
@@ -548,7 +637,11 @@ fn store_uri_gs_scheme_stays_gs_not_gcs() {
     // IMPL ACCEPTED_SCHEMES + .scheme(): `gs://` keeps scheme "gs" (NOT remapped
     // to "gcs"). The spec §3 call-out: gs -> "gs".
     let parsed = StoreUri::parse("gs://b/k").expect("gs:// parses");
-    assert_eq!(parsed.scheme(), "gs", "gs scheme is reported verbatim as 'gs'");
+    assert_eq!(
+        parsed.scheme(),
+        "gs",
+        "gs scheme is reported verbatim as 'gs'"
+    );
     assert_ne!(parsed.scheme(), "gcs", "gs is NOT remapped to gcs");
 }
 
@@ -644,8 +737,16 @@ fn snapshot_id_from_hex_is_case_insensitive_and_emits_lowercase() {
     let c = SnapshotId::from_hex(mixed).expect("mixed parses (case-insensitive)");
     assert_eq!(a, b, "upper-case input yields the same id as lower-case");
     assert_eq!(a, c, "mixed-case input yields the same id as lower-case");
-    assert_eq!(b.to_hex(), lower, "to_hex re-emits LOWERCASE for upper input");
-    assert_eq!(format!("{c}"), lower, "Display re-emits LOWERCASE for mixed input");
+    assert_eq!(
+        b.to_hex(),
+        lower,
+        "to_hex re-emits LOWERCASE for upper input"
+    );
+    assert_eq!(
+        format!("{c}"),
+        lower,
+        "Display re-emits LOWERCASE for mixed input"
+    );
 }
 
 #[test]
@@ -660,8 +761,16 @@ fn snapshot_id_all_zero_all_ff_as_map_keys_distinct() {
     assert_eq!(m.get(&z), Some(&"zero"));
     assert_eq!(m.get(&f), Some(&"ff"));
     // Display round-trip back through from_hex is stable (lowercase canonical).
-    assert_eq!(SnapshotId::from_hex(&z.to_hex()).unwrap(), z, "display->parse round-trip (zero)");
-    assert_eq!(SnapshotId::from_hex(&f.to_hex()).unwrap(), f, "display->parse round-trip (ff)");
+    assert_eq!(
+        SnapshotId::from_hex(&z.to_hex()).unwrap(),
+        z,
+        "display->parse round-trip (zero)"
+    );
+    assert_eq!(
+        SnapshotId::from_hex(&f.to_hex()).unwrap(),
+        f,
+        "display->parse round-trip (ff)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +792,10 @@ fn unique_tmp_dir(tag: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    p.push(format!("snapdir-api-m0-{tag}-{}-{nanos}", std::process::id()));
+    p.push(format!(
+        "snapdir-api-m0-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&p).expect("create temp dir");
     p
 }
@@ -763,18 +875,28 @@ fn manifest_conversion_checksum_is_hex_decoded_32_bytes() {
     let core_checksums: Vec<String> = m
         .raw
         .lines()
-        .map(|l| l.split(' ').nth(2).expect("raw line has a checksum field").to_owned())
+        .map(|l| {
+            l.split(' ')
+                .nth(2)
+                .expect("raw line has a checksum field")
+                .to_owned()
+        })
         .collect();
-    assert_eq!(core_checksums.len(), m.entries.len(), "line/entry count parity");
+    assert_eq!(
+        core_checksums.len(),
+        m.entries.len(),
+        "line/entry count parity"
+    );
 
     for (entry, core_ck) in m.entries.iter().zip(core_checksums.iter()) {
         // Re-hex the typed [u8;32] as lowercase and compare to the core string.
-        let rehexed: String = entry
-            .checksum
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(core_ck.len(), 64, "core checksum is 64 hex chars for {:?}", entry.path);
+        let rehexed: String = entry.checksum.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            core_ck.len(),
+            64,
+            "core checksum is 64 hex chars for {:?}",
+            entry.path
+        );
         assert_eq!(
             &rehexed, core_ck,
             "typed checksum bytes must re-hex to the core hex string for {:?}",
@@ -812,7 +934,10 @@ fn manifest_conversion_paths_and_dir_type_and_raw_roundtrip() {
     let mut raw_paths: Vec<PathBuf> = Vec::new();
     for line in m.raw.lines() {
         // path is everything after the 4th space (TYPE PERM CHECKSUM SIZE PATH).
-        let path_field = line.splitn(5, ' ').nth(4).expect("raw line has a path field");
+        let path_field = line
+            .splitn(5, ' ')
+            .nth(4)
+            .expect("raw line has a path field");
         raw_paths.push(PathBuf::from(path_field));
     }
     let typed_paths: Vec<PathBuf> = m.entries.iter().map(|e| e.path.clone()).collect();
@@ -822,7 +947,11 @@ fn manifest_conversion_paths_and_dir_type_and_raw_roundtrip() {
     );
 
     // (c) Directory entries' rendered path ends with '/', matching the core format.
-    for e in m.entries.iter().filter(|e| e.path_type == PathType::Directory) {
+    for e in m
+        .entries
+        .iter()
+        .filter(|e| e.path_type == PathType::Directory)
+    {
         let s = e.path.to_string_lossy();
         assert!(
             s.ends_with('/'),
@@ -832,15 +961,19 @@ fn manifest_conversion_paths_and_dir_type_and_raw_roundtrip() {
 
     // (d) `raw` reproduces a parseable, faithful manifest: re-parsing it through
     //     core yields the SAME entry set the typed view exposes (size + type).
-    let reparsed = snapdir_core::manifest::Manifest::parse(&m.raw)
-        .expect("raw is a valid core manifest");
+    let reparsed =
+        snapdir_core::manifest::Manifest::parse(&m.raw).expect("raw is a valid core manifest");
     assert_eq!(
         reparsed.entries().len(),
         m.entries.len(),
         "raw round-trips to the same number of entries"
     );
     for (typed, core) in m.entries.iter().zip(reparsed.entries().iter()) {
-        assert_eq!(typed.size, core.size, "size matches core for {:?}", typed.path);
+        assert_eq!(
+            typed.size, core.size,
+            "size matches core for {:?}",
+            typed.path
+        );
         assert_eq!(
             typed.path_type, core.path_type,
             "path_type matches core for {:?}",

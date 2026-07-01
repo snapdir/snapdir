@@ -67,7 +67,11 @@ fn assert_display_and_debug(e: &SnapdirError, code: &str) {
     let shown = format!("{e}");
     assert!(!shown.is_empty(), "Display for {code} must be non-empty");
     // Stable: formatting twice yields the identical string.
-    assert_eq!(shown, format!("{e}"), "Display for {code} must be stable across calls");
+    assert_eq!(
+        shown,
+        format!("{e}"),
+        "Display for {code} must be stable across calls"
+    );
     let dbg = format!("{e:?}");
     assert!(!dbg.is_empty(), "Debug for {code} must render non-empty");
 }
@@ -95,8 +99,10 @@ fn public_fns_return_result_over_snapdir_error_not_anyhow() {
     let _store_res: Result<StoreUri, SnapdirError> = StoreUri::parse("nope://x");
 
     // A SYNC §6 fn also returns Result<_, SnapdirError>.
-    let _mani_res: Result<snapdir_api::Manifest, SnapdirError> =
-        snapdir_api::manifest(Path::new("/nonexistent/path/for/error/typing"), &Default::default());
+    let _mani_res: Result<snapdir_api::Manifest, SnapdirError> = snapdir_api::manifest(
+        Path::new("/nonexistent/path/for/error/typing"),
+        &Default::default(),
+    );
 }
 
 // ===========================================================================
@@ -108,27 +114,41 @@ fn invalid_id_variant_maps_to_exact_code() {
     // §4 variant InvalidId -> code() == "INVALID_ID". Triggered through the REAL public
     // surface (§3 SnapshotId::from_hex on malformed input — bad length AND bad chars).
     let bad_len = SnapshotId::from_hex("deadbeef").expect_err("short hex must error InvalidId");
-    assert_eq!(bad_len.code(), "INVALID_ID", "InvalidId.code() literal is INVALID_ID");
+    assert_eq!(
+        bad_len.code(),
+        "INVALID_ID",
+        "InvalidId.code() literal is INVALID_ID"
+    );
     let _static: &'static str = static_code(&bad_len);
     assert_display_and_debug(&bad_len, "INVALID_ID");
 
     let bad_char = SnapshotId::from_hex(&format!("{}zz", "0".repeat(62)))
         .expect_err("non-hex char must error InvalidId");
-    assert_eq!(bad_char.code(), "INVALID_ID", "non-hex chars also -> INVALID_ID");
+    assert_eq!(
+        bad_char.code(),
+        "INVALID_ID",
+        "non-hex chars also -> INVALID_ID"
+    );
 
     // Empty + wrong-length-but-valid-hex are still InvalidId (degenerate inputs).
     assert_eq!(
-        SnapshotId::from_hex("").expect_err("empty -> InvalidId").code(),
+        SnapshotId::from_hex("")
+            .expect_err("empty -> InvalidId")
+            .code(),
         "INVALID_ID",
         "empty string -> INVALID_ID"
     );
     assert_eq!(
-        SnapshotId::from_hex(&"a".repeat(63)).expect_err("63 hex -> InvalidId").code(),
+        SnapshotId::from_hex(&"a".repeat(63))
+            .expect_err("63 hex -> InvalidId")
+            .code(),
         "INVALID_ID",
         "63-char (odd/short) hex -> INVALID_ID"
     );
     assert_eq!(
-        SnapshotId::from_hex(&"a".repeat(65)).expect_err("65 hex -> InvalidId").code(),
+        SnapshotId::from_hex(&"a".repeat(65))
+            .expect_err("65 hex -> InvalidId")
+            .code(),
         "INVALID_ID",
         "65-char (too-long) hex -> INVALID_ID"
     );
@@ -139,12 +159,21 @@ fn invalid_store_variant_maps_to_exact_code() {
     // §4 variant InvalidStore -> code() == "INVALID_STORE". Triggered via §3
     // StoreUri::parse on an unknown scheme ("nope://x") — the spec's exact example.
     let err = StoreUri::parse("nope://x").expect_err("unknown scheme must error InvalidStore");
-    assert_eq!(err.code(), "INVALID_STORE", "InvalidStore.code() literal is INVALID_STORE");
+    assert_eq!(
+        err.code(),
+        "INVALID_STORE",
+        "InvalidStore.code() literal is INVALID_STORE"
+    );
     let _static: &'static str = static_code(&err);
     assert_display_and_debug(&err, "INVALID_STORE");
 
     // A few more unknown schemes / malformed URIs all map to the same stable code.
-    for bad in ["wat://nope", "http://example.com/x", "://missing-scheme", "not-a-uri"] {
+    for bad in [
+        "wat://nope",
+        "http://example.com/x",
+        "://missing-scheme",
+        "not-a-uri",
+    ] {
         assert_eq!(
             StoreUri::parse(bad).expect_err("bad store uri").code(),
             "INVALID_STORE",
@@ -260,9 +289,17 @@ fn all_eight_codes_are_the_exact_stable_strings() {
     // Pin the two we can construct black-box against this canonical table (membership),
     // proving the table is the same alphabet the live values draw from.
     let id_code = SnapshotId::from_hex("zzz").expect_err("InvalidId").code();
-    let store_code = StoreUri::parse("nope://x").expect_err("InvalidStore").code();
-    assert!(expected.contains(&id_code), "{id_code:?} is in the frozen code set");
-    assert!(expected.contains(&store_code), "{store_code:?} is in the frozen code set");
+    let store_code = StoreUri::parse("nope://x")
+        .expect_err("InvalidStore")
+        .code();
+    assert!(
+        expected.contains(&id_code),
+        "{id_code:?} is in the frozen code set"
+    );
+    assert!(
+        expected.contains(&store_code),
+        "{store_code:?} is in the frozen code set"
+    );
     assert_eq!(id_code, "INVALID_ID");
     assert_eq!(store_code, "INVALID_STORE");
 
@@ -303,12 +340,18 @@ async fn source_chain_is_preserved_for_a_distribution_error() {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = src;
     let mut depth = 0usize;
     while let Some(e) = cur {
-        assert!(!format!("{e}").is_empty(), "each cause in the chain has a non-empty Display");
+        assert!(
+            !format!("{e}").is_empty(),
+            "each cause in the chain has a non-empty Display"
+        );
         cur = e.source();
         depth += 1;
         assert!(depth < 64, "error source chain must be finite (no cycle)");
     }
-    assert!(depth >= 1, "source chain has at least the one underlying cause");
+    assert!(
+        depth >= 1,
+        "source chain has at least the one underlying cause"
+    );
 }
 
 #[test]
@@ -324,7 +367,11 @@ fn from_std_io_error_preserves_io_source_and_code() {
     let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "boom-permission");
     let wrapped: SnapdirError = SnapdirError::from(inner);
 
-    assert_eq!(wrapped.code(), "IO_ERROR", "From<std::io::Error> lands on Io => IO_ERROR");
+    assert_eq!(
+        wrapped.code(),
+        "IO_ERROR",
+        "From<std::io::Error> lands on Io => IO_ERROR"
+    );
     assert_display_and_debug(&wrapped, "IO_ERROR");
 
     let src = std::error::Error::source(&wrapped).expect("Io variant exposes its io::Error source");
@@ -378,7 +425,9 @@ fn distinct_variants_have_distinct_codes() {
     // black-box-constructible variants must not collide; combined with the 8-code table
     // above this guards the per-variant uniqueness the bindings rely on.
     let a = SnapshotId::from_hex("zzz").expect_err("InvalidId").code();
-    let b = StoreUri::parse("nope://x").expect_err("InvalidStore").code();
+    let b = StoreUri::parse("nope://x")
+        .expect_err("InvalidStore")
+        .code();
     assert_ne!(a, b, "InvalidId and InvalidStore must have different codes");
 }
 
@@ -434,7 +483,10 @@ async fn hash_mismatch_is_reachable_via_a_corrupt_manifest_and_maps_to_exact_cod
     let src = tempfile::tempdir().expect("source tree");
     std::fs::write(src.path().join("a.txt"), b"hello hash mismatch").expect("write file");
     let real = snapdir_api::manifest(src.path(), &Default::default()).expect("manifest walk ok");
-    assert!(!real.raw.is_empty(), "a real walked manifest must have non-empty raw text");
+    assert!(
+        !real.raw.is_empty(),
+        "a real walked manifest must have non-empty raw text"
+    );
 
     // A store root that exists, with the manifest planted at a WRONG id (all-zeros — the walked
     // tree's real id is overwhelmingly not all-zeros, so the integrity check must fail).
@@ -472,7 +524,10 @@ async fn hash_mismatch_is_reachable_via_a_corrupt_manifest_and_maps_to_exact_cod
         shown.contains("hash mismatch"),
         "HashMismatch Display should read as a hash-mismatch, got {shown:?}"
     );
-    assert_ne!(shown, "HASH_MISMATCH", "Display is human text, distinct from the code()");
+    assert_ne!(
+        shown, "HASH_MISMATCH",
+        "Display is human text, distinct from the code()"
+    );
 }
 
 #[tokio::test]
@@ -492,7 +547,10 @@ async fn store_error_variant_is_reachable_and_chains_its_inner_store_error() {
     // and its Display must read like a store failure (NOT an integrity/hash failure).
     let src = std::error::Error::source(&err).expect("STORE_ERROR exposes its boxed StoreError");
     let inner = format!("{src}");
-    assert!(!inner.is_empty(), "the boxed StoreError has a non-empty Display");
+    assert!(
+        !inner.is_empty(),
+        "the boxed StoreError has a non-empty Display"
+    );
     assert!(
         !inner.contains("integrity"),
         "a missing manifest is a not-found StoreError, not an integrity failure: {inner:?}"

@@ -4,8 +4,8 @@
 //! `VerifyCacheOptions::cache_dir`, and `CacheOptions::cache_dir` are actually
 //! honoured by `stage()`, `verify_cache()`, and `flush_cache()`.
 
-use std::path::PathBuf;
 use snapdir_api::{CacheOptions, StageOptions, VerifyCacheOptions, VerifyCacheResult};
+use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,12 +85,18 @@ fn stage_cache_dir_none_default_struct_matches_explicit_none() {
     // Use explicit Some to confirm the id computation is path-independent.
     let id_a = snapdir_api::stage(
         &src,
-        &StageOptions { cache_dir: Some(cache_a.clone()), keep: true },
+        &StageOptions {
+            cache_dir: Some(cache_a.clone()),
+            keep: true,
+        },
     )
     .expect("stage A");
     let id_b = snapdir_api::stage(
         &src,
-        &StageOptions { cache_dir: Some(cache_b.clone()), keep: true },
+        &StageOptions {
+            cache_dir: Some(cache_b.clone()),
+            keep: true,
+        },
     )
     .expect("stage B");
 
@@ -102,8 +108,14 @@ fn stage_cache_dir_none_default_struct_matches_explicit_none() {
     assert_eq!(id_a.to_hex().len(), 64, "id must be 64-hex chars");
 
     // Both caches received the objects.
-    assert!(cache_a.join(".objects").is_dir(), "cache_a .objects must exist");
-    assert!(cache_b.join(".objects").is_dir(), "cache_b .objects must exist");
+    assert!(
+        cache_a.join(".objects").is_dir(),
+        "cache_a .objects must exist"
+    );
+    assert!(
+        cache_b.join(".objects").is_dir(),
+        "cache_b .objects must exist"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +130,10 @@ fn stage_keep_true_writes_to_cache() {
     write_tree(&src);
     let cache = tmp.path().join("cache_keep_true");
 
-    let opts = StageOptions { cache_dir: Some(cache.clone()), keep: true };
+    let opts = StageOptions {
+        cache_dir: Some(cache.clone()),
+        keep: true,
+    };
     snapdir_api::stage(&src, &opts).expect("stage keep=true");
 
     assert!(
@@ -136,11 +151,18 @@ fn stage_keep_false_does_not_write_to_cache() {
     write_tree(&src);
     let cache = tmp.path().join("cache_keep_false");
 
-    let opts = StageOptions { cache_dir: Some(cache.clone()), keep: false };
+    let opts = StageOptions {
+        cache_dir: Some(cache.clone()),
+        keep: false,
+    };
     let id = snapdir_api::stage(&src, &opts).expect("stage keep=false");
 
     // The id must still be a valid 64-hex string.
-    assert_eq!(id.to_hex().len(), 64, "id must be valid even with keep=false");
+    assert_eq!(
+        id.to_hex().len(),
+        64,
+        "id must be valid even with keep=false"
+    );
 
     // But the cache dir must NOT have been created / written to.
     assert!(
@@ -163,13 +185,19 @@ fn stage_keep_false_and_true_return_same_id() {
 
     let id_keep = snapdir_api::stage(
         &src,
-        &StageOptions { cache_dir: Some(cache_a), keep: true },
+        &StageOptions {
+            cache_dir: Some(cache_a),
+            keep: true,
+        },
     )
     .expect("stage keep=true");
 
     let id_no_keep = snapdir_api::stage(
         &src,
-        &StageOptions { cache_dir: Some(cache_b), keep: false },
+        &StageOptions {
+            cache_dir: Some(cache_b),
+            keep: false,
+        },
     )
     .expect("stage keep=false");
 
@@ -192,7 +220,9 @@ fn verify_cache_custom_dir_empty_is_clean() {
     let cache = tmp.path().join("empty_cache");
     std::fs::create_dir_all(&cache).unwrap();
 
-    let opts = VerifyCacheOptions { cache_dir: Some(cache) };
+    let opts = VerifyCacheOptions {
+        cache_dir: Some(cache),
+    };
     let result = snapdir_api::verify_cache(&opts).expect("verify_cache");
     assert!(result.ok, "empty cache dir should be clean");
 }
@@ -207,11 +237,16 @@ fn verify_cache_custom_dir_after_stage_is_clean() {
     let cache = tmp.path().join("stage_cache");
 
     // Stage into the custom cache.
-    let stage_opts = StageOptions { cache_dir: Some(cache.clone()), keep: true };
+    let stage_opts = StageOptions {
+        cache_dir: Some(cache.clone()),
+        keep: true,
+    };
     snapdir_api::stage(&src, &stage_opts).expect("stage");
 
     // Verify the custom cache — must be clean.
-    let verify_opts = VerifyCacheOptions { cache_dir: Some(cache) };
+    let verify_opts = VerifyCacheOptions {
+        cache_dir: Some(cache),
+    };
     let result = snapdir_api::verify_cache(&verify_opts).expect("verify_cache");
     assert!(result.ok, "freshly staged cache must be clean");
 }
@@ -226,9 +261,11 @@ fn verify_cache_nonexistent_dir_is_clean() {
     // Do NOT create it.
     assert!(!nonexistent.exists());
 
-    let opts = VerifyCacheOptions { cache_dir: Some(nonexistent) };
-    let VerifyCacheResult { ok } = snapdir_api::verify_cache(&opts)
-        .expect("verify_cache on non-existent dir");
+    let opts = VerifyCacheOptions {
+        cache_dir: Some(nonexistent),
+    };
+    let VerifyCacheResult { ok } =
+        snapdir_api::verify_cache(&opts).expect("verify_cache on non-existent dir");
     assert!(ok, "non-existent cache dir must be reported as clean");
 }
 
@@ -245,12 +282,20 @@ fn flush_cache_custom_dir_removes_objects() {
     let cache = tmp.path().join("flush_cache");
 
     // Stage first so there's something to flush.
-    let stage_opts = StageOptions { cache_dir: Some(cache.clone()), keep: true };
+    let stage_opts = StageOptions {
+        cache_dir: Some(cache.clone()),
+        keep: true,
+    };
     snapdir_api::stage(&src, &stage_opts).expect("stage");
-    assert!(cache.join(".objects").is_dir(), "objects must exist before flush");
+    assert!(
+        cache.join(".objects").is_dir(),
+        "objects must exist before flush"
+    );
 
     // Flush the custom cache.
-    let flush_opts = CacheOptions { cache_dir: Some(cache.clone()) };
+    let flush_opts = CacheOptions {
+        cache_dir: Some(cache.clone()),
+    };
     snapdir_api::flush_cache(&flush_opts).expect("flush_cache");
 
     // The cache dir may still exist, but .objects/ must be gone.
@@ -268,9 +313,10 @@ fn flush_cache_nonexistent_dir_is_noop() {
     let nonexistent = tmp.path().join("flush_nonexistent");
     assert!(!nonexistent.exists());
 
-    let opts = CacheOptions { cache_dir: Some(nonexistent) };
-    snapdir_api::flush_cache(&opts)
-        .expect("flush_cache on non-existent dir must succeed");
+    let opts = CacheOptions {
+        cache_dir: Some(nonexistent),
+    };
+    snapdir_api::flush_cache(&opts).expect("flush_cache on non-existent dir must succeed");
 }
 
 /// `flush_cache()` with a custom `cache_dir` does NOT affect another cache.
@@ -286,21 +332,35 @@ fn flush_cache_custom_dir_does_not_affect_other_cache() {
     // Stage into two separate caches.
     snapdir_api::stage(
         &src,
-        &StageOptions { cache_dir: Some(keeper_cache.clone()), keep: true },
+        &StageOptions {
+            cache_dir: Some(keeper_cache.clone()),
+            keep: true,
+        },
     )
     .expect("stage into keeper_cache");
     snapdir_api::stage(
         &src,
-        &StageOptions { cache_dir: Some(flush_target.clone()), keep: true },
+        &StageOptions {
+            cache_dir: Some(flush_target.clone()),
+            keep: true,
+        },
     )
     .expect("stage into flush_target");
 
-    assert!(keeper_cache.join(".objects").is_dir(), "keeper .objects must exist");
-    assert!(flush_target.join(".objects").is_dir(), "flush_target .objects must exist");
+    assert!(
+        keeper_cache.join(".objects").is_dir(),
+        "keeper .objects must exist"
+    );
+    assert!(
+        flush_target.join(".objects").is_dir(),
+        "flush_target .objects must exist"
+    );
 
     // Flush only flush_target.
-    snapdir_api::flush_cache(&CacheOptions { cache_dir: Some(flush_target.clone()) })
-        .expect("flush flush_target");
+    snapdir_api::flush_cache(&CacheOptions {
+        cache_dir: Some(flush_target.clone()),
+    })
+    .expect("flush flush_target");
 
     // flush_target's objects are gone.
     assert!(
@@ -344,8 +404,14 @@ fn cache_options_default_is_backward_compat() {
 /// `#[non_exhaustive]`).
 #[test]
 fn option_structs_support_functional_update_syntax() {
-    let _s = StageOptions { cache_dir: None, ..Default::default() };
-    let _s2 = StageOptions { keep: false, ..Default::default() };
+    let _s = StageOptions {
+        cache_dir: None,
+        ..Default::default()
+    };
+    let _s2 = StageOptions {
+        keep: false,
+        ..Default::default()
+    };
     let _vc = VerifyCacheOptions {
         cache_dir: Some(PathBuf::from("/tmp")),
         ..Default::default()

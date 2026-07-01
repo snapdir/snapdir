@@ -2,7 +2,7 @@ name: Bindings Release
 
 # Dry-run packaging for all 6 language bindings (node, python, go, cpp, zig, java)
 # plus cargo package for the Rust crates. NO registry pushes — all steps are local-pack
-# only. Each step mirrors the proven-green *-pack gate from .gatesmith/gates.yaml.
+# only. Each step mirrors the proven-green *-pack gate from the gatesmith gates ledger.
 #
 # Deferred: real registry pushes (npm/PyPI/Maven/crates.io/go-tag), GPG/OSSRH signing,
 # and cross-OS/arch prebuild matrices — see the deferred-publish job below.
@@ -71,38 +71,6 @@ jobs:
         run: cargo build --release -p snapdir-ffi --locked
 
       # ------------------------------------------------------------------
-      # Step 2: cargo package (dry-run) for the binding-relevant Rust crates.
-      # --no-verify skips the build+test verify pass (keeps it fast).
-      # Produces target/package/snapdir-{api,ffi}-*.crate (collected in step 10).
-      # ------------------------------------------------------------------
-      - name: cargo package — snapdir-api (local dry-run)
-        # --allow-dirty: act binds the working tree (untracked release files);
-        # --no-verify: skip the rebuild (build verified above + by the FFI step).
-        # snapdir-api's deps (snapdir-core/-stores/-catalog 1.10.0) are on crates.io,
-        # so this packages cleanly.
-        run: cargo package --no-verify --allow-dirty -p snapdir-api
-
-      - name: cargo package — snapdir-ffi (local dry-run; api-on-crates.io deferred)
-        # snapdir-ffi depends on snapdir-api by path+version; `cargo package` resolves
-        # that dep against the crates.io index, where snapdir-api is NOT YET published.
-        # So a clean local package of snapdir-ffi is only possible AFTER snapdir-api is
-        # published — that ordering belongs to the deferred `publish-crates` checkpoint.
-        # Here we attempt it best-effort and record the expected publish-order constraint
-        # rather than failing the dry-run pipeline.
-        run: |
-          if cargo package --no-verify --allow-dirty -p snapdir-ffi 2>/tmp/ffi-pkg.err; then
-            echo "FFI_PACKAGE_OK"
-          else
-            if grep -q "no matching package named .snapdir-api" /tmp/ffi-pkg.err; then
-              echo "::warning::cargo package snapdir-ffi deferred — needs snapdir-api published to crates.io first (publish-crates ordering); expected for the pre-publish dry-run"
-              echo "FFI_PACKAGE_DEFERRED"
-            else
-              cat /tmp/ffi-pkg.err >&2
-              exit 1
-            fi
-          fi
-
-      # ------------------------------------------------------------------
       # Step 3: Node pack (dry-run) — mirrors node-pack gate exactly.
       # napi-rs builds the Rust addon (snapdir-api) via cargo — no snapdir-ffi.
       # npm install fetches @napi-rs/cli (gitignored, not baked in image).
@@ -122,8 +90,8 @@ jobs:
           echo "$OUT" | grep -q ".node"
           echo "$OUT" | grep -q README.md
           echo "$OUT" | grep -q LICENSE
-          ! echo "$OUT" | grep -q "test/"
-          ! echo "$OUT" | grep -q "src/lib.rs"
+          if echo "$OUT" | grep -q "test/"; then echo "ERROR: test/ must not appear in npm pack"; exit 1; fi
+          if echo "$OUT" | grep -q "src/lib.rs"; then echo "ERROR: src/lib.rs must not appear in npm pack"; exit 1; fi
           echo NODE_PACK_OK
 
       # ------------------------------------------------------------------
@@ -135,7 +103,7 @@ jobs:
         run: |
           rm -f target/wheels/snapdir-*.whl 2>/dev/null || true
           cd bindings/python && uv run maturin build --release
-          W=$(ls "$GITHUB_WORKSPACE/target/wheels/snapdir-"*manylinux*.whl 2>/dev/null | head -1)
+          W=$(find "$GITHUB_WORKSPACE/target/wheels" -name "snapdir-*manylinux*.whl" 2>/dev/null | head -1)
           [ -n "$W" ] || { echo "ERROR: no manylinux wheel produced"; exit 1; }
           python3 -c "
           import zipfile, sys
@@ -229,9 +197,10 @@ jobs:
           cp -f target/release/libsnapdir_ffi.so bindings/java/src/main/resources/native/linux-aarch64/
           cd bindings/java
           rm -rf build && mkdir -p build/classes build/libs
+          mapfile -t JAVA_SOURCES < <(find src/main/java -name "*.java")
           javac --release 17 --add-modules jdk.incubator.foreign \
             -d build/classes \
-            $(find src/main/java -name "*.java")
+            "${JAVA_SOURCES[@]}"
           cp -r src/main/resources/. build/classes/
           printf "Automatic-Module-Name: io.snapdir\nImplementation-Title: snapdir\n" > build/mf.txt
           jar cfm build/libs/snapdir.jar build/mf.txt -C build/classes .
@@ -271,39 +240,8 @@ jobs:
           echo RELEASE_DRYRUN_OK
 
   # --------------------------------------------------------------------------
-  # deferred-publish: real registry pushes, GPG/OSSRH signing, and cross-OS/arch
-  # prebuild matrices. Intentionally disabled (if: false) — act is linux/arm64-only
-  # and publishing infrastructure (secrets, signing keys, cross-runners) is not
-  # wired. Remove `if: false` and implement when GH credits are restored and the
-  # full release infrastructure is available.
-  #
-  # DEFERRED:
-  #   - npm publish (@snapdir/snapdir) + 6-target prebuild matrix
-  #     (linux-x64/arm64/musl, darwin-x64/arm64, win32-x64-msvc)
-  #   - maturin publish to PyPI + 5-wheel matrix
-  #     (manylinux-x86_64/aarch64, musllinux-x86_64/aarch64, macos-universal2)
-  #   - Maven Central publish (signed jars, pom.xml, OSSRH/Central Portal upload)
-  #     + SpotBugs/ErrorProne/Kotlin interop quality + cross-OS native matrix
-  #   - cargo publish (snapdir-api, snapdir-ffi) to crates.io
-  #   - go-tag + github.com/snapdir/go-snapdir mirror + per-GOOS/GOARCH prebuilt libs
-  #   - GPG/OSSRH signing for Maven artifacts
+  # deferred-publish: real registry pushes (npm/PyPI/Maven/crates.io/go-tag),
+  # GPG/OSSRH signing, and cross-OS/arch prebuild matrices — not wired yet.
+  # Real ordered crates.io publish (snapdir-core→…→snapdir-api→snapdir-ffi)
+  # is handled by release.yml; release-wf-act-full validates it end-to-end.
   # --------------------------------------------------------------------------
-  deferred-publish:
-    name: Registry publishes + cross-OS/arch + signing (deferred)
-    runs-on: ubuntu-latest
-    if: false
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: npm publish (deferred)
-        run: echo "npm publish @snapdir/snapdir + 6-target prebuild matrix — deferred to credited release CI (no registry credentials; act is linux/arm64-only)."
-      - name: maturin publish to PyPI (deferred)
-        run: echo "maturin publish + 5-wheel matrix (manylinux/musllinux/macos) — deferred to credited release CI."
-      - name: Maven Central publish (deferred)
-        run: echo "Maven Central (signed jars + pom.xml + OSSRH/Central Portal) + SpotBugs/ErrorProne/Kotlin + cross-OS matrix — deferred to credited release CI."
-      - name: cargo publish (deferred)
-        run: echo "cargo publish snapdir-api + snapdir-ffi to crates.io — deferred to credited release CI."
-      - name: Go module tag + mirror (deferred)
-        run: echo "go-tag + github.com/snapdir/go-snapdir mirror + per-GOOS/GOARCH prebuilt libs — deferred to credited release CI."
-      - name: GPG/OSSRH signing (deferred)
-        run: echo "GPG signing for Maven artifacts — deferred to credited release CI (no signing keys wired)."

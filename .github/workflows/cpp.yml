@@ -123,22 +123,5 @@ jobs:
           echo "parity: FAILED after 3 attempts" >&2
           exit 1
 
-  # --------------------------------------------------------------------------
-  # deferred: CMake + Windows/macOS/cross-arch (intentionally disabled).
-  #
-  # CMake FindSnapdir/FetchContent example and Windows/macOS/cross-arch legs
-  # are deferred to credited release CI — the image has no cmake and act is
-  # linux/arm64-only. Remove `if: false` and implement when GH credits are
-  # restored and these environments are available.
-  # --------------------------------------------------------------------------
-  deferred-cmake-cross:
-    name: CMake + cross-arch (deferred)
-    runs-on: ubuntu-latest
-    if: false
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: CMake FindSnapdir example (deferred)
-        run: echo "CMake FindSnapdir/FetchContent — deferred to credited release CI (image has no cmake)."
-      - name: Windows/macOS cross (deferred)
-        run: echo "Windows/macOS/cross-arch legs — deferred to credited release CI (act is linux/arm64-only)."
+  # DEFERRED (not implemented here): CMake FindSnapdir/FetchContent example and
+  # Windows/macOS/cross-arch legs. Re-implement in credited release CI.

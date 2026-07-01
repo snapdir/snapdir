@@ -40,7 +40,11 @@ pub type Result<T> = std::result::Result<T, SnapdirError>;
 pub enum SnapdirError {
     /// An underlying I/O failure.
     #[error("I/O error: {0}")]
-    Io(#[from] #[source] std::io::Error),
+    Io(
+        #[from]
+        #[source]
+        std::io::Error,
+    ),
 
     /// A content-hash mismatch (object or manifest integrity failure).
     #[error("hash mismatch: {message}")]
@@ -522,8 +526,7 @@ impl Manifest {
             .entries()
             .iter()
             .map(|e| {
-                let permissions =
-                    u32::from_str_radix(&e.permissions, 8).unwrap_or(0);
+                let permissions = u32::from_str_radix(&e.permissions, 8).unwrap_or(0);
                 let mut checksum = [0u8; 32];
                 // Core stores checksums as 64-char lowercase hex; decode it.
                 if e.checksum.len() == 64 {
@@ -755,7 +758,10 @@ pub struct StageOptions {
 
 impl Default for StageOptions {
     fn default() -> Self {
-        Self { cache_dir: None, keep: true }
+        Self {
+            cache_dir: None,
+            keep: true,
+        }
     }
 }
 
@@ -861,8 +867,7 @@ pub(crate) fn shared_runtime() -> &'static tokio::runtime::Runtime {
 /// `$HOME/.cache/snapdir`.
 fn cache_dir_default() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    let base = std::env::var("XDG_CACHE_HOME")
-        .unwrap_or_else(|_| format!("{home}/.cache"));
+    let base = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
     PathBuf::from(format!("{base}/snapdir"))
 }
 
@@ -925,16 +930,9 @@ fn build_walk_options(
     } else {
         // Wrap each pattern in a non-capturing group then OR them together,
         // mirroring the CLI's `combine_excludes`.
-        let groups: Vec<String> = opts
-            .exclude
-            .iter()
-            .map(|p| format!("(?:{p})"))
-            .collect();
+        let groups: Vec<String> = opts.exclude.iter().map(|p| format!("(?:{p})")).collect();
         let combined = groups.join("|");
-        Some(
-            ExcludeMatcher::new(&combined)
-                .map_err(|e| format!("invalid exclude pattern: {e}"))?,
-        )
+        Some(ExcludeMatcher::new(&combined).map_err(|e| format!("invalid exclude pattern: {e}"))?)
     };
     Ok(WalkOptions {
         follow,
@@ -976,9 +974,8 @@ fn walk_with_opts(
 /// Returns `Err(SnapdirError::Io)` if `path` is not accessible or the walk
 /// fails for filesystem reasons.
 pub fn manifest(path: &Path, options: &ManifestOptions) -> Result<Manifest> {
-    let walk_opts = build_walk_options(options).map_err(|e| {
-        SnapdirError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-    })?;
+    let walk_opts = build_walk_options(options)
+        .map_err(|e| SnapdirError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
     let root = resolve_api_root(path)?;
     let core_manifest = walk_with_opts(&root, &walk_opts, options).map_err(|e| match e {
         snapdir_core::walk::WalkError::Io { path: _, source } => SnapdirError::Io(source),
@@ -997,11 +994,10 @@ pub fn manifest(path: &Path, options: &ManifestOptions) -> Result<Manifest> {
 /// Returns `Err(SnapdirError::Io)` if `path` is not accessible or the walk
 /// fails.
 pub fn id(path: &Path, options: &ManifestOptions) -> Result<SnapshotId> {
-    use snapdir_core::merkle::{Blake3Hasher, snapshot_id};
+    use snapdir_core::merkle::{snapshot_id, Blake3Hasher};
 
-    let walk_opts = build_walk_options(options).map_err(|e| {
-        SnapdirError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-    })?;
+    let walk_opts = build_walk_options(options)
+        .map_err(|e| SnapdirError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
     let root = resolve_api_root(path)?;
     let core_manifest = walk_with_opts(&root, &walk_opts, options).map_err(|e| match e {
         snapdir_core::walk::WalkError::Io { path: _, source } => SnapdirError::Io(source),
@@ -1029,7 +1025,7 @@ pub fn id(path: &Path, options: &ManifestOptions) -> Result<SnapshotId> {
 #[must_use]
 pub fn id_from_manifest(m: &Manifest) -> SnapshotId {
     use snapdir_core::manifest::Manifest as CoreManifest;
-    use snapdir_core::merkle::{Blake3Hasher, snapshot_id};
+    use snapdir_core::merkle::{snapshot_id, Blake3Hasher};
 
     let hasher = Blake3Hasher::new();
     // Re-parse from the raw text so we use the same format as the oracle.
@@ -1048,7 +1044,7 @@ pub fn id_from_manifest(m: &Manifest) -> SnapshotId {
 ///
 /// Returns `Err(SnapdirError)` if the walk fails or the cache write fails.
 pub fn stage(path: &Path, _options: &StageOptions) -> Result<SnapshotId> {
-    use snapdir_core::merkle::{Blake3Hasher, snapshot_id};
+    use snapdir_core::merkle::{snapshot_id, Blake3Hasher};
     use snapdir_core::store::Store;
     use snapdir_core::walk::{walk, WalkOptions};
     use snapdir_stores::file_store::FileStore;
@@ -1056,13 +1052,10 @@ pub fn stage(path: &Path, _options: &StageOptions) -> Result<SnapshotId> {
     let hasher = Blake3Hasher::new();
     let walk_opts = WalkOptions::default();
     let root = resolve_api_root(path)?;
-    let core_manifest =
-        walk(&root, &walk_opts, &hasher).map_err(|e| match e {
-            snapdir_core::walk::WalkError::Io { path: _, source } => {
-                SnapdirError::Io(source)
-            }
-            other => SnapdirError::Io(std::io::Error::other(other.to_string())),
-        })?;
+    let core_manifest = walk(&root, &walk_opts, &hasher).map_err(|e| match e {
+        snapdir_core::walk::WalkError::Io { path: _, source } => SnapdirError::Io(source),
+        other => SnapdirError::Io(std::io::Error::other(other.to_string())),
+    })?;
     let hex = snapshot_id(&core_manifest, &hasher);
     let snap_id = SnapshotId::from_hex(&hex)?;
 
@@ -1095,7 +1088,9 @@ pub fn verify_cache(_o: &VerifyCacheOptions) -> Result<VerifyCacheResult> {
     let cache_dir = _o.cache_dir.clone().unwrap_or_else(cache_dir_default);
     let hasher = Blake3Hasher::new();
     match core_verify_cache(&cache_dir, false, &hasher) {
-        Ok(report) => Ok(VerifyCacheResult { ok: report.is_clean() }),
+        Ok(report) => Ok(VerifyCacheResult {
+            ok: report.is_clean(),
+        }),
         Err(CacheError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             // Missing cache dir = clean.
             Ok(VerifyCacheResult { ok: true })
@@ -1163,9 +1158,7 @@ fn catalog_err(e: &snapdir_catalog::CatalogError) -> SnapdirError {
 /// Returns `Ok(None)` when the database file has disappeared since we checked
 /// (TOCTOU: the file existed at `resolve_catalog_db` time but was deleted
 /// concurrently). The callers treat `Ok(None)` as "no catalog".
-fn open_catalog_with_retry(
-    db_path: &std::path::Path,
-) -> Result<Option<snapdir_catalog::Catalog>> {
+fn open_catalog_with_retry(db_path: &std::path::Path) -> Result<Option<snapdir_catalog::Catalog>> {
     let mut last_err = None;
     for attempt in 0..10u32 {
         // If the file vanished between resolve_catalog_db and here, treat as
@@ -1300,19 +1293,13 @@ pub fn defaults() -> EffectiveConfig {
 ///
 /// Returns `Err(SnapdirError)` if the store is unreachable, the snapshot is
 /// absent, or the local cache write fails.
-pub async fn fetch(
-    id: &SnapshotId,
-    store: &StoreUri,
-    _options: &TransferOptions,
-) -> Result<()> {
+pub async fn fetch(id: &SnapshotId, store: &StoreUri, _options: &TransferOptions) -> Result<()> {
     let hex_id = id.to_hex();
     let store_str = store.raw.clone();
 
-    tokio::task::spawn_blocking(move || {
-        fetch_sync(&hex_id, &store_str)
-    })
-    .await
-    .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
+    tokio::task::spawn_blocking(move || fetch_sync(&hex_id, &store_str))
+        .await
+        .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
 }
 
 /// Pulls a snapshot from `store` into `dest`, materializing its files.
@@ -1333,11 +1320,9 @@ pub async fn pull(
     let store_str = store.raw.clone();
     let dest = dest.to_path_buf();
 
-    tokio::task::spawn_blocking(move || {
-        pull_sync(&hex_id, &store_str, &dest)
-    })
-    .await
-    .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
+    tokio::task::spawn_blocking(move || pull_sync(&hex_id, &store_str, &dest))
+        .await
+        .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
 }
 
 /// Pushes a snapshot to `store` and returns the snapshot id.
@@ -1360,20 +1345,17 @@ pub async fn push(
     match src {
         PushSource::Path(path) => {
             // Compute manifest + id synchronously (CPU-bound, fast enough inline).
-            use snapdir_core::merkle::{Blake3Hasher, snapshot_id};
+            use snapdir_core::merkle::{snapshot_id, Blake3Hasher};
             use snapdir_core::walk::{walk, WalkOptions};
 
             let hasher = Blake3Hasher::new();
             let walk_opts = WalkOptions::default();
             let root = resolve_api_root(path)?;
             let path_buf = root.clone();
-            let core_manifest =
-                walk(&root, &walk_opts, &hasher).map_err(|e| match e {
-                    snapdir_core::walk::WalkError::Io { path: _, source } => {
-                        SnapdirError::Io(source)
-                    }
-                    other => SnapdirError::Io(std::io::Error::other(other.to_string())),
-                })?;
+            let core_manifest = walk(&root, &walk_opts, &hasher).map_err(|e| match e {
+                snapdir_core::walk::WalkError::Io { path: _, source } => SnapdirError::Io(source),
+                other => SnapdirError::Io(std::io::Error::other(other.to_string())),
+            })?;
             let hex = snapshot_id(&core_manifest, &hasher);
             let snap_id = SnapshotId::from_hex(&hex)?;
 
@@ -1415,9 +1397,7 @@ pub async fn push(
                 .map_err(SnapdirError::from)?;
 
                 // Verify the manifest was written to the destination.
-                dst_fs
-                    .get_manifest(&hex_id)
-                    .map_err(SnapdirError::from)?;
+                dst_fs.get_manifest(&hex_id).map_err(SnapdirError::from)?;
                 drop(core_manifest);
                 Ok(snap_id)
             })
@@ -1437,11 +1417,7 @@ pub async fn push(
 ///
 /// Returns `Err(SnapdirError)` if the manifest is not found in the cache or
 /// file materialization fails.
-pub async fn checkout(
-    id: &SnapshotId,
-    dest: &Path,
-    _o: &CheckoutOptions,
-) -> Result<()> {
+pub async fn checkout(id: &SnapshotId, dest: &Path, _o: &CheckoutOptions) -> Result<()> {
     let hex_id = id.to_hex();
     let dest_buf = dest.to_path_buf();
 
@@ -1509,11 +1485,7 @@ pub async fn sync(
 ///
 /// Returns `Err(SnapdirError)` if the store is unreachable, the snapshot is
 /// absent, or a transport error occurs.
-pub async fn verify(
-    id: &SnapshotId,
-    store: &StoreUri,
-    _o: &VerifyOptions,
-) -> Result<VerifyResult> {
+pub async fn verify(id: &SnapshotId, store: &StoreUri, _o: &VerifyOptions) -> Result<VerifyResult> {
     let hex_id = id.to_hex();
     let store_str = store.raw.clone();
 
@@ -1608,10 +1580,7 @@ fn pull_sync(hex_id: &str, store_str: &str, dest: &Path) -> Result<()> {
 // applied deepest-first so tightening a parent's mode never blocks setting a
 // child's.  Mirrors the CLI's `restore_permissions` / `apply_mode` pair in
 // `snapdir-cli/src/cli.rs`.
-fn restore_permissions(
-    manifest: &snapdir_core::manifest::Manifest,
-    dest: &Path,
-) -> Result<()> {
+fn restore_permissions(manifest: &snapdir_core::manifest::Manifest, dest: &Path) -> Result<()> {
     use snapdir_core::manifest::PathType;
 
     // Files first.
@@ -1868,10 +1837,12 @@ fn open_store(uri: &str) -> Result<Box<dyn snapdir_core::store::Store>> {
                 B2Store::connect(uri, None, None).map_err(SnapdirError::from)?,
             ))
         }
-        Adapter::Gcs => Ok(Box::new(GcsStore::connect(uri).map_err(SnapdirError::from)?)),
-        Adapter::External { .. } => {
-            Ok(Box::new(ExternalStore::new(uri).map_err(SnapdirError::from)?))
-        }
+        Adapter::Gcs => Ok(Box::new(
+            GcsStore::connect(uri).map_err(SnapdirError::from)?,
+        )),
+        Adapter::External { .. } => Ok(Box::new(
+            ExternalStore::new(uri).map_err(SnapdirError::from)?,
+        )),
     }
 }
 
@@ -1897,12 +1868,12 @@ fn open_stream_store(uri: &str) -> Result<Box<dyn snapdir_stores::stream::Stream
                 S3Store::connect(uri, endpoint.as_deref()).map_err(SnapdirError::from)?,
             ))
         }
-        Adapter::B2 => {
-            Ok(Box::new(
-                B2Store::connect(uri, None, None).map_err(SnapdirError::from)?,
-            ))
-        }
-        Adapter::Gcs => Ok(Box::new(GcsStore::connect(uri).map_err(SnapdirError::from)?)),
+        Adapter::B2 => Ok(Box::new(
+            B2Store::connect(uri, None, None).map_err(SnapdirError::from)?,
+        )),
+        Adapter::Gcs => Ok(Box::new(
+            GcsStore::connect(uri).map_err(SnapdirError::from)?,
+        )),
         Adapter::External { name } => Err(SnapdirError::InvalidStore {
             message: format!(
                 "store-to-store streaming (fetch/sync/verify) requires an in-process store \

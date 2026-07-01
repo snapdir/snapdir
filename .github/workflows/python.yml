@@ -67,6 +67,14 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
+      # uv is not pre-installed on ubuntu-latest runners — install it here.
+      # astral-sh/setup-uv@v6 adds uv to PATH; the lock-pinned venv sync and
+      # maturin develop steps below all call `uv run …`.
+      # ------------------------------------------------------------------
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      # ------------------------------------------------------------------
       # Step 1: Build PyO3 extension + sync venv (uv run maturin develop)
       # Fetches deps from PyPI on first sync (uv.lock is committed → reproducible).
       # Creates bindings/python/.venv with the snapdir extension installed.
@@ -119,25 +127,6 @@ jobs:
           echo "parity: FAILED after 3 attempts" >&2
           exit 1
 
-  # --------------------------------------------------------------------------
-  # deferred: wheel matrix (5 targets) + maturin build/publish
-  # (intentionally disabled).
-  #
-  # Building per-target wheels for manylinux-x86_64, manylinux-aarch64,
-  # musllinux-x86_64, musllinux-aarch64, and macos-universal2, plus
-  # maturin build/publish to PyPI, are deferred to credited release CI —
-  # act is linux/arm64-only and cannot run cross-arch wheel builds.
-  # Remove `if: false` and implement when GH credits are restored and
-  # manylinux docker + cross-compilation rigs are available.
-  # --------------------------------------------------------------------------
-  deferred-wheel-publish:
-    name: Wheel matrix (5 targets) + maturin publish (deferred)
-    runs-on: ubuntu-latest
-    if: false
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Wheel matrix (manylinux/musllinux/macos — deferred)
-        run: echo "5-target wheel matrix (manylinux-x86_64/aarch64, musllinux-x86_64/aarch64, macos-universal2) — deferred to credited release CI (act is linux/arm64-only)."
-      - name: maturin build / publish to PyPI (deferred)
-        run: echo "maturin build + PyPI publish — deferred to credited release CI."
+  # DEFERRED (not implemented here): wheel matrix (manylinux-x86_64/aarch64,
+  # musllinux-x86_64/aarch64, macos-universal2) + maturin build/PyPI publish.
+  # Re-implement in credited release CI when cross-arch wheel rigs are available.

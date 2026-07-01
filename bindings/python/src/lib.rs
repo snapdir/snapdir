@@ -69,7 +69,10 @@ fn raise_snapdir_err(py: Python<'_>, e: snapdir_api::SnapdirError) -> PyErr {
     };
 
     // Attach .code to the exception instance
-    if let Ok(instance) = py_err.value(py).downcast::<pyo3::exceptions::PyBaseException>() {
+    if let Ok(instance) = py_err
+        .value(py)
+        .downcast::<pyo3::exceptions::PyBaseException>()
+    {
         let _ = instance.setattr("code", code.as_str());
     }
     py_err
@@ -164,7 +167,11 @@ pub struct Manifest {
 #[pymethods]
 impl Manifest {
     fn __repr__(&self) -> String {
-        format!("Manifest(entries={}, raw_len={})", self.entries.len(), self.raw.len())
+        format!(
+            "Manifest(entries={}, raw_len={})",
+            self.entries.len(),
+            self.raw.len()
+        )
     }
 }
 
@@ -173,11 +180,14 @@ fn api_manifest_to_py(m: snapdir_api::Manifest) -> Manifest {
         .entries
         .into_iter()
         .map(|e| {
-            let checksum = e.checksum.iter().fold(String::with_capacity(64), |mut s, b| {
-                use std::fmt::Write;
-                write!(s, "{b:02x}").unwrap();
-                s
-            });
+            let checksum = e
+                .checksum
+                .iter()
+                .fold(String::with_capacity(64), |mut s, b| {
+                    use std::fmt::Write;
+                    write!(s, "{b:02x}").unwrap();
+                    s
+                });
             ManifestEntry {
                 path: e.path.to_string_lossy().into_owned(),
                 path_type: PathType::from(e.path_type),
@@ -187,7 +197,10 @@ fn api_manifest_to_py(m: snapdir_api::Manifest) -> Manifest {
             }
         })
         .collect();
-    Manifest { entries, raw: m.raw }
+    Manifest {
+        entries,
+        raw: m.raw,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +286,9 @@ impl StoreUri {
     fn new(s: &str) -> PyResult<Self> {
         Python::with_gil(|py| {
             let uri = api_result(py, snapdir_api::StoreUri::parse(s))?;
-            Ok(StoreUri { raw: uri.to_string() })
+            Ok(StoreUri {
+                raw: uri.to_string(),
+            })
         })
     }
 
@@ -310,11 +325,17 @@ impl DiffOptions {
     ) -> PyResult<Self> {
         let from_list = extract_store_uri_list(from_uris)?;
         let to_list = extract_store_uri_list(to_uris)?;
-        Ok(DiffOptions { from_uris: from_list, to_uris: to_list })
+        Ok(DiffOptions {
+            from_uris: from_list,
+            to_uris: to_list,
+        })
     }
 
     fn __repr__(&self) -> String {
-        format!("DiffOptions(from={:?}, to={:?})", self.from_uris, self.to_uris)
+        format!(
+            "DiffOptions(from={:?}, to={:?})",
+            self.from_uris, self.to_uris
+        )
     }
 }
 
@@ -389,7 +410,11 @@ fn id_from_manifest(m: PyRef<'_, Manifest>) -> String {
 // build_manifest_options() — shared helper for manifest/id keyword options
 // ---------------------------------------------------------------------------
 
-fn build_manifest_options(no_follow: bool, absolute: bool, exclude: Option<Vec<String>>) -> snapdir_api::ManifestOptions {
+fn build_manifest_options(
+    no_follow: bool,
+    absolute: bool,
+    exclude: Option<Vec<String>>,
+) -> snapdir_api::ManifestOptions {
     let mut o = snapdir_api::ManifestOptions::default();
     o.no_follow = no_follow;
     o.absolute = absolute;
@@ -412,15 +437,20 @@ fn build_manifest_options(no_follow: bool, absolute: bool, exclude: Option<Vec<S
 ///   - `exclude`: list of extended-regex patterns to exclude (default `None`)
 #[pyfunction]
 #[pyo3(signature = (path, *, no_follow=false, absolute=false, exclude=None))]
-fn manifest<'py>(py: Python<'py>, path: &Bound<'_, PyAny>, no_follow: bool, absolute: bool, exclude: Option<Vec<String>>) -> PyResult<Bound<'py, PyAny>> {
+fn manifest<'py>(
+    py: Python<'py>,
+    path: &Bound<'_, PyAny>,
+    no_follow: bool,
+    absolute: bool,
+    exclude: Option<Vec<String>>,
+) -> PyResult<Bound<'py, PyAny>> {
     let path_buf = path_arg(path)?;
     let opts = build_manifest_options(no_follow, absolute, exclude);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let api_result_val = tokio::task::spawn_blocking(move || {
-            snapdir_api::manifest(&path_buf, &opts)
-        })
-        .await
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let api_result_val =
+            tokio::task::spawn_blocking(move || snapdir_api::manifest(&path_buf, &opts))
+                .await
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
             let m = api_result(py, api_result_val)?;
@@ -444,15 +474,19 @@ fn manifest<'py>(py: Python<'py>, path: &Bound<'_, PyAny>, no_follow: bool, abso
 ///   - `exclude`: list of extended-regex patterns to exclude (default `None`)
 #[pyfunction]
 #[pyo3(signature = (path, *, no_follow=false, absolute=false, exclude=None))]
-fn id<'py>(py: Python<'py>, path: &Bound<'_, PyAny>, no_follow: bool, absolute: bool, exclude: Option<Vec<String>>) -> PyResult<Bound<'py, PyAny>> {
+fn id<'py>(
+    py: Python<'py>,
+    path: &Bound<'_, PyAny>,
+    no_follow: bool,
+    absolute: bool,
+    exclude: Option<Vec<String>>,
+) -> PyResult<Bound<'py, PyAny>> {
     let path_buf = path_arg(path)?;
     let opts = build_manifest_options(no_follow, absolute, exclude);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let api_result_val = tokio::task::spawn_blocking(move || {
-            snapdir_api::id(&path_buf, &opts)
-        })
-        .await
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let api_result_val = tokio::task::spawn_blocking(move || snapdir_api::id(&path_buf, &opts))
+            .await
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
             let sid = api_result(py, api_result_val)?;
@@ -602,12 +636,8 @@ fn checkout<'py>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let sid = snapdir_api::SnapshotId::from_hex(&sid_hex)
             .map_err(|e| Python::with_gil(|py| raise_snapdir_err(py, e)))?;
-        let result = snapdir_api::checkout(
-            &sid,
-            &dest_buf,
-            &snapdir_api::CheckoutOptions::default(),
-        )
-        .await;
+        let result =
+            snapdir_api::checkout(&sid, &dest_buf, &snapdir_api::CheckoutOptions::default()).await;
         Python::with_gil(|py| {
             api_result(py, result)?;
             Ok(py.None())
@@ -639,13 +669,8 @@ fn sync<'py>(
             .map_err(|e| Python::with_gil(|py| raise_snapdir_err(py, e)))?;
         let dst = snapdir_api::StoreUri::parse(&dst_raw)
             .map_err(|e| Python::with_gil(|py| raise_snapdir_err(py, e)))?;
-        let result = snapdir_api::sync(
-            &sid,
-            &src,
-            &dst,
-            &snapdir_api::TransferOptions::default(),
-        )
-        .await;
+        let result =
+            snapdir_api::sync(&sid, &src, &dst, &snapdir_api::TransferOptions::default()).await;
         Python::with_gil(|py| {
             api_result(py, result)?;
             Ok(py.None())

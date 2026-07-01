@@ -47,8 +47,7 @@ async fn pull_into_restricted_dest_restores_perms_and_reids_correctly() {
     let (_sg, store) = file_store();
     let to = TransferOptions::default();
 
-    let src_id =
-        snapdir_api::id(root.as_path(), &ManifestOptions::default()).expect("source id");
+    let src_id = snapdir_api::id(root.as_path(), &ManifestOptions::default()).expect("source id");
     let pushed = snapdir_api::push(PushSource::Path(root.as_path()), &store, &to)
         .await
         .expect("push");
@@ -63,8 +62,7 @@ async fn pull_into_restricted_dest_restores_perms_and_reids_correctly() {
         .await
         .expect("pull");
 
-    let reid =
-        snapdir_api::id(dest_td.path(), &ManifestOptions::default()).expect("re-id pulled");
+    let reid = snapdir_api::id(dest_td.path(), &ManifestOptions::default()).expect("re-id pulled");
     assert_eq!(reid, src_id, "pulled tree must re-id to the source id");
 }
 
@@ -80,15 +78,13 @@ async fn checkout_into_restricted_dest_restores_perms_and_reids_correctly() {
     let (_sg, store) = file_store();
     let to = TransferOptions::default();
 
-    let src_id =
-        snapdir_api::id(root.as_path(), &ManifestOptions::default()).expect("source id");
+    let src_id = snapdir_api::id(root.as_path(), &ManifestOptions::default()).expect("source id");
     let staged = snapdir_api::stage(root.as_path(), &StageOptions::default()).expect("stage");
     assert_eq!(staged, src_id);
 
-    let pushed =
-        snapdir_api::push(PushSource::StagedId(&staged), &store, &to)
-            .await
-            .expect("push staged");
+    let pushed = snapdir_api::push(PushSource::StagedId(&staged), &store, &to)
+        .await
+        .expect("push staged");
     assert_eq!(pushed, src_id);
 
     // Fetch into the local cache so checkout can find the objects.

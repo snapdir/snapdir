@@ -28,6 +28,30 @@ ignore = [
     # (the bench perf tooling), and is never shipped in any published crate or the
     # CLI binary.
     "RUSTSEC-2026-0173",
+    # anyhow — unsoundness in Error::downcast_mut() when called on a context-wrapped
+    # error. The affected code path (.context(...) followed by downcast_mut() on the
+    # returned anyhow::Error) is NOT exercised anywhere in this workspace: `grep -rn
+    # "downcast_mut"` returns zero hits across all crates. Furthermore, anyhow is
+    # declared only in snapdir-cli (a binary), not in any published library crate, so
+    # downstream consumers are not at risk. Drop this ignore once anyhow ships a
+    # patched release that addresses RUSTSEC-2026-0190.
+    "RUSTSEC-2026-0190",
+    # pyo3 0.23 — PyString::from_object does not null-terminate the &str argument
+    # before passing it to the Python C API, risking an out-of-bounds read. The
+    # snapdir-python binding does NOT call PyString::from_object; all string
+    # conversions use .extract::<String>(), .into_pyobject(), and the standard
+    # PyO3 derive macros — none of which route through the affected function.
+    # Drop this ignore once the binding is upgraded to pyo3 >=0.24.1 (subject to
+    # the ≥3-day dependency-cooldown policy).
+    "RUSTSEC-2025-0020",
+    # pyo3 0.23 — PyCFunction::new_closure misses a Sync bound, permitting data
+    # races when the closure is invoked concurrently from Python threads. The
+    # snapdir-python binding does NOT call PyCFunction::new_closure; async
+    # functions are exposed via #[pyfunction] + wrap_pyfunction! + future_into_py,
+    # which go through a different code path unaffected by this advisory.
+    # Drop this ignore once the binding is upgraded to pyo3 >=0.29.0 (subject to
+    # the ≥3-day dependency-cooldown policy).
+    "RUSTSEC-2026-0177",
 ]
 
 [licenses]
