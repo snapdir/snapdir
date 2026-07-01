@@ -520,7 +520,7 @@ jobs:
         run: |
           set -euo pipefail
           npx napi create-npm-dirs
-          npx napi artifacts --artifacts-dir artifacts
+          npx napi artifacts --output-dir artifacts
 
       - name: Publish per-platform packages (@snapdir/snapdir-<triple>)
         working-directory: bindings/node
@@ -793,8 +793,7 @@ jobs:
             "linux-x86_64:libsnapdir_ffi.so" \
             "linux-aarch64:libsnapdir_ffi.so" \
             "mac-x86_64:libsnapdir_ffi.dylib" \
-            "mac-aarch64:libsnapdir_ffi.dylib" \
-            "win-x86_64:libsnapdir_ffi.dll"; do
+            "mac-aarch64:libsnapdir_ffi.dylib"; do
             platform="${pair%%:*}"
             libname="${pair##*:}"
             destdir="bindings/java/src/main/resources/native/${platform}"
