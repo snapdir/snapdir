@@ -50,6 +50,10 @@ unparseable = "unparseable"
 # `disabl` = a deliberate SUBSTRING in the catalog_default tests (`.contains("disabl")`)
 # that case-insensitively matches the "catalog disabled (--catalog none)" message text.
 disabl = "disabl"
+# `-Iinclude` is the C/C++ compiler include-path flag (bindings/cpp + C_ABI docs), not a typo.
+Iinclude = "Iinclude"
+# `clonable` is a valid adjective; intentional in the diff_status_is_eq_and_clonable test name.
+clonable = "clonable"
 
 [default.extend-identifiers]
 # crate / API identifiers that look like typos but are intentional.

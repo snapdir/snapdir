@@ -22,5 +22,10 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 [build-dependencies]
 napi-build = "2"
 
+[package.metadata.cargo-shear]
+# tokio is declared to enable the rt-multi-thread runtime the napi async path relies on
+# (via snapdir-api); it isn't referenced directly in node's src.
+ignored = ["tokio"]
+
 [lints]
 workspace = true
