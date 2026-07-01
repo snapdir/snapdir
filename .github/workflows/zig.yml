@@ -1,9 +1,9 @@
 name: Zig
 
 # Build and test the snapdir Zig binding (@cImport over the frozen C ABI), run
-# the adversary-authored api test suite (zig build test, Debug, aarch64), quality
-# checks (ReleaseSafe LIB + c.zig invariants), and validate manifest-parity
-# (45 PASS / 0 FAIL / 3 SKIP).
+# the adversary-authored api test suite (zig build test, Debug, native arch),
+# quality checks (ReleaseSafe LIB + c.zig invariants), and validate
+# manifest-parity (45 PASS / 0 FAIL / 3 SKIP).
 #
 # Verification substrate: snapdir-bindings:dev (arm64, non-root uid 1000). Rust
 # and zig 0.13 are baked into the image. NO apt, NO toolchain-install steps,
@@ -51,14 +51,15 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # zig: build snapdir-ffi, vendor artifacts, run unit tests (Debug, aarch64),
-  # quality checks (ReleaseSafe LIB + c.zig invariants), and manifest parity
-  # (45/0/3).
+  # zig: build snapdir-ffi, vendor artifacts, run unit tests (Debug, native
+  # arch), quality checks (ReleaseSafe LIB + c.zig invariants), and manifest
+  # parity (45/0/3).
   #
   # Runs inside the baked snapdir-bindings:dev image (arm64, non-root uid 1000,
   # rust 1.91.1, zig 0.13). NO apt, NO dtolnay/rust-toolchain.
-  # Zig @cImport wraps snapdir-ffi C ABI — build.zig bakes aarch64 target for
-  # test + driver (ffi .a is arm64, zig is amd64-emulated under qemu).
+  # Zig @cImport wraps snapdir-ffi C ABI — build.zig uses -Dtest-arch= (set to
+  # runner's uname -m) so the test/driver arch always matches the freshly-built
+  # ffi .a (x86_64 on GH runner, aarch64 in dev-image).
   # --------------------------------------------------------------------------
   zig:
     name: "Zig (@cImport: zig build test + ReleaseSafe + parity)"
@@ -96,12 +97,12 @@ jobs:
           echo "vendor: OK (libsnapdir_ffi.a + snapdir.h)"
 
       # ------------------------------------------------------------------
-      # Step 3: Unit tests (Debug, aarch64) — mirrors zig-api-tests-review.
-      # build.zig targets aarch64-linux-gnu for the test step; the binary
-      # runs natively via binfmt_misc on the arm64 kernel under qemu.
+      # Step 3: Unit tests (Debug, native arch) — mirrors zig-api-tests-review.
+      # -Dtest-arch=$(uname -m) makes the test binary arch match the freshly-
+      # built ffi .a (x86_64 on GH runners; aarch64 in the dev-image).
       # ------------------------------------------------------------------
-      - name: Unit tests (Debug, aarch64 — zig build test)
-        run: cd bindings/zig && zig build test
+      - name: Unit tests (Debug, native arch — zig build test)
+        run: cd bindings/zig && zig build test "-Dtest-arch=$(uname -m | sed 's/arm64/aarch64/')"
 
       # ------------------------------------------------------------------
       # Step 4: Quality (ReleaseSafe LIB + c.zig invariants) — mirrors
@@ -129,7 +130,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Parity — build zig-driver-bin
         run: |
-          cd bindings/zig && zig build driver
+          cd bindings/zig && zig build driver "-Dtest-arch=$(uname -m | sed 's/arm64/aarch64/')"
           cp -f "$GITHUB_WORKSPACE/bindings/zig/zig-out/bin/snapdir-parity-driver" \
             "$GITHUB_WORKSPACE/tests/golden/drivers/zig-driver-bin"
           chmod +x "$GITHUB_WORKSPACE/tests/golden/drivers/zig-driver-bin"

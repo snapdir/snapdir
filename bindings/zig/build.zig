@@ -58,15 +58,20 @@ pub fn build(b: *std.Build) void {
 
     // ── test step ────────────────────────────────────────────────────────────
     //
-    // The test binary targets aarch64-linux-gnu to match the vendored arm64
-    // libsnapdir_ffi.a (the docker image is amd64 but runs on an arm64 kernel,
-    // so the aarch64 binary executes natively via binfmt_misc / native).
+    // The test binary targets <test-arch>-linux-gnu to match the vendored
+    // libsnapdir_ffi.a.  The arch is controlled by the `-Dtest-arch=` build
+    // option (default "aarch64" to preserve dev-image behavior; pass
+    // `-Dtest-arch=x86_64` on x86_64 GH runners where cargo builds an x86_64
+    // staticlib).  In the dev image (amd64-emulated, arm64 kernel) aarch64
+    // executes natively via binfmt_misc.
     //
     // Link order: libsnapdir_ffi.a (static) + libc + pthread + dl + m.
     // The snapdir module is exposed as an import so `@import("snapdir")` works.
 
+    const test_arch_name = b.option([]const u8, "test-arch", "cpu arch for the FFI-linked test/driver binaries (matches the vendored libsnapdir_ffi.a)") orelse "aarch64";
+    const test_cpu_arch = std.meta.stringToEnum(std.Target.Cpu.Arch, test_arch_name) orelse .aarch64;
     const test_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
+        .cpu_arch = test_cpu_arch,
         .os_tag   = .linux,
         .abi      = .gnu,
     });
@@ -115,8 +120,8 @@ pub fn build(b: *std.Build) void {
     // ── parity driver executable (`zig build driver`) ────────────────────────
     //
     // A CLI over the binding implementing the cross-language parity §1 protocol
-    // (manifest/id/push/fetch/checkout). Same aarch64 target + ffi link as the
-    // test binary (it calls the C ABI at runtime); it does NOT need
+    // (manifest/id/push/fetch/checkout). Same `-Dtest-arch` target + ffi link
+    // as the test binary (it calls the C ABI at runtime); it does NOT need
     // fchmod_compat.c (no Dir.chmod path). The manifest-parity-zig gate builds
     // this and copies zig-out/bin/snapdir-parity-driver to
     // tests/golden/drivers/zig-driver-bin, which tests/golden/drivers/zig.sh execs.

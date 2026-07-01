@@ -1,5 +1,13 @@
 name: Bindings Release
 
+# MANUAL LOCAL-PACK SMOKE — dispatch only, not a PR/push gate.
+# Superseded for CI gating by release.yml (real ordered publish) and the
+# per-binding workflows (node.yml / python.yml / go.yml / cpp.yml / zig.yml /
+# java.yml + ffi.yml), which run on real hosted runners.
+# This workflow requires the snapdir-bindings:dev Docker image (arm64, baked
+# toolchain) and is only useful when run locally via act or triggered manually.
+# It fails on GitHub-hosted runners (exit 127 — uv/zig/toolchains not present).
+#
 # Dry-run packaging for all 6 language bindings (node, python, go, cpp, zig, java)
 # plus cargo package for the Rust crates. NO registry pushes — all steps are local-pack
 # only. Each step mirrors the proven-green *-pack gate from the gatesmith gates ledger.
@@ -16,20 +24,7 @@ name: Bindings Release
 #   act -W .github/workflows/bindings-release.yml --pull=false -P ubuntu-latest=snapdir-bindings:dev
 
 on:
-  push:
-    branches: [main, dev]
-    paths:
-      - "bindings/**"
-      - "crates/**"
-      - "include/snapdir.h"
-      - ".github/workflows/bindings-release.yml"
-  pull_request:
-    branches: [main, dev]
-    paths:
-      - "bindings/**"
-      - "crates/**"
-      - "include/snapdir.h"
-      - ".github/workflows/bindings-release.yml"
+  workflow_dispatch:
 
 concurrency:
   group: bindings-release-${{ github.workflow }}-${{ github.ref }}
