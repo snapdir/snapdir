@@ -431,9 +431,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             cross: false
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -554,18 +551,23 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: manylinux2014
+            args: --release --locked --out dist
           - os: ubuntu-latest
             target: aarch64
             manylinux: manylinux2014
+            args: --release --locked --out dist --zig
           - os: ubuntu-latest
             target: x86_64
             manylinux: musllinux_1_2
+            args: --release --locked --out dist
           - os: ubuntu-latest
             target: aarch64
             manylinux: musllinux_1_2
+            args: --release --locked --out dist --zig
           - os: macos-14
             target: universal2-apple-darwin
             manylinux: ""
+            args: --release --locked --out dist
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -576,7 +578,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           working-directory: bindings/python
-          args: --release --locked --out dist
+          args: ${{ matrix.args }}
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
@@ -691,13 +693,6 @@ jobs:
             cross: false
             cargo_lib: libsnapdir_ffi.dylib
             jar_lib: libsnapdir_ffi.dylib
-          - os: win
-            arch: x86_64
-            rust_target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            cross: false
-            cargo_lib: snapdir_ffi.dll
-            jar_lib: libsnapdir_ffi.dll
     steps:
       - name: Checkout
         uses: actions/checkout@v4
