@@ -759,9 +759,12 @@ jobs:
   # ---------------------------------------------------------------------------
   maven-publish:
     name: Publish Maven Central (org.snapdir:snapdir)
-    needs: [release, java-native]
-    # Publish ONLY on a real `v*` tag push; a workflow_dispatch dry-run stops here.
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    # Only needs the native libs; the GitHub-release job is a parallel concern.
+    # (Dropping `release` from needs lets a workflow_dispatch re-run deploy Maven
+    # alone — e.g. to recover a failed Maven leg without a tag force-move.)
+    needs: [java-native]
+    # Publish on a real `v*` tag push OR a manual workflow_dispatch (Maven-only re-run).
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -817,8 +820,12 @@ jobs:
           mvn --batch-mode -f bindings/java/pom.xml deploy \
             -Dgpg.keyname=${{ secrets.GPG_KEY_FINGERPRINT }}
         env:
-          MAVEN_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
-          MAVEN_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          # These names MUST match setup-java's server-username/server-password
+          # (SONATYPE_USERNAME/SONATYPE_PASSWORD), which are the placeholders it
+          # wrote into ~/.m2/settings.xml as ${env.SONATYPE_USERNAME}/${env.SONATYPE_PASSWORD}.
+          # (Previously MAVEN_USERNAME/MAVEN_PASSWORD → placeholders resolved empty → Bearer base64(:) → 401.)
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
   # ---------------------------------------------------------------------------
