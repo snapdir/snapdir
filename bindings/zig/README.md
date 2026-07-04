@@ -27,6 +27,25 @@ at build time (they are gitignored, not checked in). Because that library is bui
 for one CPU arch, `build.zig` links it with the matching target (see the build.zig
 NOTE). Per-OS/arch prebuilt libraries are deferred to credited release CI.
 
+### Building the C ABI from the published crate (crates.io)
+
+There is no separate Zig package registry blob for the native lib — the published
+artifact is the [`snapdir-ffi`](https://crates.io/crates/snapdir-ffi) **source
+crate**. Build it and generate the header (the crate ships `build = false` + no
+header, so run `cbindgen`), then place them in `include/` + `lib/`:
+
+```sh
+# needs a Rust toolchain + cbindgen; on Alpine also: apk add libgcc
+cargo build --release                       # -> libsnapdir_ffi.a
+cbindgen --config cbindgen.toml --crate snapdir-ffi --output include/snapdir.h .
+```
+
+> **Alpine/musl note:** the Rust staticlib links `libgcc_s`; Alpine ships only
+> the versioned `libgcc_s.so.1`, so `ln -sf /usr/lib/libgcc_s.so.1
+> /usr/lib/libgcc_s.so` and build **native** (no `-Dtarget`, since the container
+> is already the musl target). Verified by the `zig` job in
+> `.github/workflows/verify-published.yml`.
+
 ## Consume as a Zig package
 
 `build.zig.zon` declares the package; consumers reference it by content hash:

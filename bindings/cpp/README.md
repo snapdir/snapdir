@@ -26,6 +26,25 @@ Python, and Go bindings.
   CMake `FindSnapdir`/`FetchContent` integration are deferred to release CI; this
   package builds with the native toolchain via the included `Makefile`.
 
+### Consuming the published C ABI (outside this repo)
+
+There is no separate C++ package registry — the published artifact is the
+[`snapdir-ffi`](https://crates.io/crates/snapdir-ffi) **source crate** on
+crates.io. An external consumer builds it and generates the header (the crate
+ships `build = false` and no header, so run `cbindgen`):
+
+```sh
+# needs a Rust toolchain + cbindgen (`apk add rust cargo cbindgen` on Alpine)
+# fetch the snapdir-ffi 1.11.0 source, then:
+cargo build --release                       # -> target/release/libsnapdir_ffi.a
+cbindgen --config cbindgen.toml --crate snapdir-ffi --output snapdir.h .
+g++ -std=c++20 app.cpp -I. -L. -lsnapdir_ffi -lpthread -ldl -lm -o app
+```
+
+with `snapdir.hpp` from this binding. This exact flow (on blank-slate
+`alpine:3.20`, musl) is verified by `.github/workflows/verify-published.yml`
+(the `cpp` job).
+
 ## Build & install
 
 ```sh
