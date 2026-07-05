@@ -1,0 +1,234 @@
+# ===========================================================================
+# verify-published — Phase 45.E final acceptance.
+#
+# Pulls the PUBLISHED 1.11.0 bindings from their LIVE public registries,
+# installs them on blank-slate base images, and runs each language's example
+# app through the shared push/pull/id contract over a local file:// store,
+# asserting the snapshot id is byte-exact to the canonical Rust-oracle golden
+# id (GOLDEN_ID_A). This is the "an arbitrary end user can install it and it
+# works" proof — nothing in this repo is used except the example app source
+# and the smoke assertion.
+#
+# musl / Alpine reality (see .gatesmith/reviews/verify-published.md):
+#   node, python, go, cpp, zig  -> blank-slate ALPINE (musl)
+#   java                        -> GLIBC base (the published 1.11.0 jar embeds
+#                                  a glibc .so; NativeLoader has no musl probe,
+#                                  so it cannot load on Alpine — a documented
+#                                  gap tracked for a 1.11.1 musl-native fix).
+#
+# Each job runs the install+smoke inside `docker run <base>` from the ubuntu
+# host (so actions/checkout runs with the host node, and the container is a
+# genuine blank slate). No minio, no AWS creds.
+# ===========================================================================
+name: verify-published
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly (Mon 05:17 UTC) — catch registry drift, yanks, or a broken
+    # transitive dep in a published binding.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  SNAPDIR_VERSION: "1.11.0"
+  GOLDEN_ID_A: "9e12678a4ba37d1fb6864842b02e8b306c70ba1793479dc71bab12cc21f0703b"
+
+jobs:
+  # ---- npm: @snapdir/snapdir on blank-slate Alpine (musl), no compiler ------
+  node:
+    name: node · npm · alpine-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install @snapdir/snapdir from npm + run example smoke
+        run: |
+          docker run --rm -v "$PWD":/w -w /w \
+            -e SNAPDIR_VERSION -e GOLDEN_ID_A \
+            node:22-alpine sh -euc '
+              apk add --no-cache bash coreutils >/dev/null
+              mkdir -p /app && cd /app
+              npm init -y >/dev/null 2>&1
+              echo "installing @snapdir/snapdir@${SNAPDIR_VERSION} from npm..."
+              npm install "@snapdir/snapdir@${SNAPDIR_VERSION}" --no-audit --no-fund
+              cp /w/examples/node/app.mjs /app/app.mjs
+              # prove it is the musl artifact that loaded
+              node -e "require(\"@snapdir/snapdir\"); console.log(\"loaded native binding on\", process.platform, process.arch)"
+              bash /w/tests/integration/verify_published_smoke.sh node /app/app.mjs
+            '
+
+  # ---- PyPI: snapdir musllinux wheel on blank-slate Alpine, no compiler -----
+  python:
+    name: python · pypi · alpine-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install snapdir from PyPI + run example smoke
+        run: |
+          docker run --rm -v "$PWD":/w -w /w \
+            -e SNAPDIR_VERSION -e GOLDEN_ID_A \
+            python:3.12-alpine sh -euc '
+              apk add --no-cache bash coreutils >/dev/null
+              echo "installing snapdir==${SNAPDIR_VERSION} from PyPI (musllinux wheel)..."
+              pip install --no-cache-dir --only-binary=:all: "snapdir==${SNAPDIR_VERSION}"
+              python3 -c "import snapdir, sys; print(\"loaded snapdir\", getattr(snapdir,\"__version__\",\"?\"), \"on\", sys.platform)"
+              bash /w/tests/integration/verify_published_smoke.sh python3 /w/examples/python/app.py
+            '
+
+  # ---- Maven Central: org.snapdir:snapdir on a GLIBC base (Java exception) --
+  java:
+    name: java · maven · glibc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: fetch the published jar from Maven Central (host)
+        run: |
+          curl -fsSL -o snapdir.jar \
+            "https://repo1.maven.org/maven2/org/snapdir/snapdir/${SNAPDIR_VERSION}/snapdir-${SNAPDIR_VERSION}.jar"
+          ls -l snapdir.jar
+      - name: compile + run example smoke on temurin (glibc)
+        run: |
+          docker run --rm -v "$PWD":/w -w /w \
+            -e SNAPDIR_VERSION -e GOLDEN_ID_A \
+            eclipse-temurin:17-jdk bash -euc '
+              cd /tmp
+              cp /w/snapdir.jar snapdir.jar
+              cp /w/examples/java/App.java App.java
+              echo "compiling App.java against org.snapdir:snapdir:${SNAPDIR_VERSION}..."
+              javac --release 17 --add-modules jdk.incubator.foreign -cp snapdir.jar App.java
+              bash /w/tests/integration/verify_published_smoke.sh \
+                java --add-modules jdk.incubator.foreign --enable-native-access=ALL-UNNAMED \
+                -cp /tmp/snapdir.jar:/tmp App
+            '
+
+  # ---- crates.io C ABI: build snapdir-ffi from source (musl) ONCE, share ----
+  # C++/Zig/Go have no prebuilt binary package — they consume the C ABI by
+  # compiling snapdir-ffi from its crates.io SOURCE. Build it once here (against
+  # the current stable rust in rust:alpine — MSRV is 1.91, too new for Alpine's
+  # system rust) + generate the header with cbindgen (the crate ships build=false
+  # + no header), then share the {libsnapdir_ffi.a, snapdir.h} musl artifact.
+  cabi:
+    name: cabi · snapdir-ffi from crates.io (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - name: build libsnapdir_ffi.a + cbindgen header from crates.io
+        run: |
+          mkdir -p cabi-out
+          docker run --rm -v "$PWD/cabi-out":/out -e SNAPDIR_VERSION \
+            rust:alpine sh -euc '
+              apk add --no-cache musl-dev cbindgen curl tar >/dev/null
+              echo "toolchain: $(rustc --version)"
+              cd /tmp
+              curl -fsSL "https://static.crates.io/crates/snapdir-ffi/snapdir-ffi-${SNAPDIR_VERSION}.crate" -o ffi.crate
+              tar xzf ffi.crate
+              cd "snapdir-ffi-${SNAPDIR_VERSION}"
+              echo "building libsnapdir_ffi.a (musl) from the crates.io source tree..."
+              cargo build --release
+              cbindgen --config cbindgen.toml --crate snapdir-ffi --output /out/snapdir.h .
+              cp target/release/libsnapdir_ffi.a /out/
+              ls -l /out
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cabi-musl
+          path: cabi-out/
+          retention-days: 1
+
+  # ---- C++: crates.io ffi staticlib + repo RAII header (no C++ registry) ----
+  cpp:
+    name: cpp · crates.io ffi · alpine-musl
+    needs: cabi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cabi-musl
+          path: cabi
+      - name: build cpp example against the crates.io ffi + run smoke
+        run: |
+          docker run --rm -v "$PWD":/w -w /w -e GOLDEN_ID_A \
+            alpine:3.20 sh -euc '
+              apk add --no-cache bash coreutils g++ musl-dev >/dev/null
+              mkdir -p /app && cd /app
+              cp /w/bindings/cpp/include/snapdir.hpp .
+              cp /w/cabi/snapdir.h .
+              cp /w/cabi/libsnapdir_ffi.a .
+              cp /w/examples/cpp/app.cpp .
+              echo "g++ building the C++ example against libsnapdir_ffi.a (crates.io)..."
+              g++ -std=c++20 -Wall -Wextra app.cpp -I. -L. -lsnapdir_ffi -lpthread -ldl -lm -o app
+              bash /w/tests/integration/verify_published_smoke.sh /app/app
+            '
+
+  # ---- Zig: crates.io ffi staticlib + repo zig wrapper (no zig registry) ----
+  zig:
+    name: zig · crates.io ffi · alpine-musl
+    needs: cabi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cabi-musl
+          path: cabi
+      - name: build zig example against the crates.io ffi + run smoke
+        run: |
+          docker run --rm -v "$PWD":/w -w /w -e GOLDEN_ID_A \
+            alpine:3.20 sh -euc '
+              # libgcc provides libgcc_s (the Rust runtime unwinder the zig build
+              # links); Alpine ships only the versioned .so.1, so symlink the
+              # unversioned name zig searches for. Build NATIVE (no -Dtarget): the
+              # container is already the musl target, and a cross build would not
+              # search the host /usr/lib for gcc_s.
+              apk add --no-cache bash coreutils curl tar xz libgcc >/dev/null
+              ln -sf /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so
+              curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C /opt
+              export PATH="/opt/zig-linux-x86_64-0.13.0:$PATH"
+              echo "zig: $(zig version)"
+              mkdir -p /app && cd /app
+              cp -r /w/bindings/zig/src ./src
+              mkdir -p include lib
+              cp /w/cabi/snapdir.h include/snapdir.h
+              cp /w/cabi/libsnapdir_ffi.a lib/libsnapdir_ffi.a
+              cp /w/examples/zig/app.zig /w/examples/zig/build.zig .
+              zig build -Doptimize=ReleaseSafe
+              bash /w/tests/integration/verify_published_smoke.sh /app/zig-out/bin/app
+            '
+
+  # ---- Go: GOPROXY module (real registry) + crates.io ffi staticlib --------
+  # `go get` fetches the module source from GOPROXY, but the module is NOT
+  # self-contained (the CGo lib/header are gitignored, supplied by the
+  # consumer). Copy the GOPROXY module to a writable dir, drop in the crates.io
+  # ffi lib + cbindgen header, and build via a replace directive.
+  go:
+    name: go · GOPROXY module + crates.io ffi · alpine-musl
+    needs: cabi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cabi-musl
+          path: cabi
+      - name: build go example (module from GOPROXY) + run smoke
+        run: |
+          docker run --rm -v "$PWD":/w -w /w -e SNAPDIR_VERSION -e GOLDEN_ID_A \
+            golang:1.24-alpine sh -euc '
+              apk add --no-cache bash coreutils gcc musl-dev >/dev/null
+              export CGO_ENABLED=1 GOFLAGS=-mod=mod
+              mkdir -p /app && cd /app
+              printf "module snapdir-verify\n\ngo 1.22\n\nrequire github.com/snapdir/snapdir/bindings/go v%s\n" "${SNAPDIR_VERSION}" > go.mod
+              cp /w/examples/go/app.go .
+              echo "fetching github.com/snapdir/snapdir/bindings/go@v${SNAPDIR_VERSION} from GOPROXY..."
+              go mod download github.com/snapdir/snapdir/bindings/go
+              MODDIR="$(go env GOMODCACHE)/github.com/snapdir/snapdir/bindings/go@v${SNAPDIR_VERSION}"
+              cp -r "${MODDIR}" ./snapdir-go && chmod -R u+w ./snapdir-go
+              mkdir -p ./snapdir-go/lib ./snapdir-go/include
+              cp /w/cabi/libsnapdir_ffi.a ./snapdir-go/lib/
+              cp /w/cabi/snapdir.h ./snapdir-go/include/
+              go mod edit -replace "github.com/snapdir/snapdir/bindings/go=./snapdir-go"
+              go build -o app .
+              bash /w/tests/integration/verify_published_smoke.sh /app/app
+            '
