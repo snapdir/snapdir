@@ -8,6 +8,11 @@ Node.js bindings for [snapdir](https://snapdir.org) — a content-addressed dire
 npm install @snapdir/snapdir
 ```
 
+Ships prebuilt native binaries for linux (gnu + **musl**) and macOS on x64 +
+arm64 — no compiler needed, and it runs on **Alpine** out of the box (the loader
+selects the musl `.node`). Verified from npm on `node:22-alpine` by
+`.github/workflows/verify-published.yml`.
+
 ## Usage
 
 ### ESM

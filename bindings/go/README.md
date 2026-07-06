@@ -157,6 +157,30 @@ func main() {
 **`SnapdirError`**: implements `error`; stable `.Code` string (one of: `IO_ERROR`, `HASH_MISMATCH`,
 `STORE_ERROR`, `IN_FLUX`, `CATALOG_ERROR`, `INVALID_ID`, `INVALID_STORE`, `CONFLICT`).
 
+## Install from the published module (GOPROXY)
+
+The module resolves from GOPROXY at the tag `bindings/go/v1.11.0`:
+
+```sh
+go get github.com/snapdir/snapdir/bindings/go@v1.11.0
+```
+
+Because this is a CGo package, the module is **not self-contained** — you must
+supply the native `libsnapdir_ffi.a` + `snapdir.h`. Build them from the published
+`snapdir-ffi` crate (crates.io) and drop them into the module's `lib/` +
+`include/` (the module ships neither — they are gitignored):
+
+```sh
+# build the C ABI staticlib + header from the crates.io source (needs Rust + cbindgen)
+cbindgen --config cbindgen.toml --crate snapdir-ffi --output snapdir.h .
+# place libsnapdir_ffi.a into <module>/lib/ and snapdir.h into <module>/include/
+CGO_ENABLED=1 go build ./...
+```
+
+This exact flow (GOPROXY module + crates.io ffi on blank-slate `golang:1.24-alpine`)
+is verified by `.github/workflows/verify-published.yml` (the `go` job) — on Alpine
+musl and glibc.
+
 ## License
 
 MIT

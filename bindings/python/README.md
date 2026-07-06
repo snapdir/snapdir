@@ -9,6 +9,9 @@ pip install snapdir
 ```
 
 Requires Python 3.10+ (abi3 wheel — one wheel covers all CPython ≥ 3.10).
+Prebuilt manylinux + **musllinux** wheels (x64 + arm64) and macOS — runs on
+**Alpine** with no compiler. Verified from PyPI on `python:3.12-alpine` by
+`.github/workflows/verify-published.yml`.
 
 Supported platforms: Linux (x86-64, aarch64), macOS (x86-64, arm64).
 
