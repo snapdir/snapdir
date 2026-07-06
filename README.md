@@ -29,6 +29,26 @@ cargo add snapdir-core
 > implementation library behind the CLI. Its versions ≤ 1.5.0 still install
 > the binary; from 1.6.0 the binary lives in the `snapdir` crate.
 
+## Language bindings
+
+Use snapdir from your language — every binding produces **bit-identical**
+manifests and snapshot IDs to the CLI. See **[`bindings/`](bindings/)** for the
+full index, per-language APIs, and platform notes.
+
+| Language | Install | Registry |
+|---|---|---|
+| Node.js | `npm install @snapdir/snapdir` | [npm](https://www.npmjs.com/package/@snapdir/snapdir) |
+| Python | `pip install snapdir` | [PyPI](https://pypi.org/project/snapdir/) |
+| Go | `go get github.com/snapdir/snapdir/bindings/go` | GOPROXY |
+| Java | `org.snapdir:snapdir` (Maven / Gradle) | [Maven Central](https://central.sonatype.com/artifact/org.snapdir/snapdir) |
+| C / C++ | [`snapdir-ffi`](https://crates.io/crates/snapdir-ffi) + `snapdir.hpp` | crates.io |
+| Zig | [`snapdir-ffi`](https://crates.io/crates/snapdir-ffi) + Zig wrapper | crates.io |
+| Rust | `cargo add snapdir-api` | [crates.io](https://crates.io/crates/snapdir-api) |
+
+Node/Python/Java install prebuilt (no compiler); C/C++/Zig/Go build the C ABI
+from source. All run on Linux (glibc + Alpine/musl) and macOS — see
+[`bindings/README.md`](bindings/README.md) for the platform matrix.
+
 ## Quick start — 60 seconds, no setup
 
 No cloud account needed: snapshot a directory and round-trip it through a **local** store.
