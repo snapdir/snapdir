@@ -250,3 +250,34 @@ async def verify(
     :class:`SnapshotId` instance.  I/O-bound async operation.
     """
     ...
+
+@final
+class SizeStats:
+    """Byte-size accounting for a snapshot or store (BigQuery nomenclature).
+
+    All attributes are arbitrary-precision Python ``int`` (mapped from Rust
+    ``u64``). Objects are stored uncompressed, so ``physical_bytes`` equals the
+    on-disk ``.objects/`` byte total.
+    """
+    logical_bytes: int
+    physical_bytes: int
+    files: int
+    objects: int
+    def __repr__(self) -> str: ...
+
+def manifest_size(m: Manifest) -> SizeStats:
+    """Compute the :class:`SizeStats` of an already-loaded ``Manifest`` (SYNC,
+    pure). ``logical_bytes`` sums file sizes (duplicates counted);
+    ``physical_bytes`` sums size over unique content checksums.
+    """
+    ...
+
+async def size(store: StoreUri, id: SnapshotId | None = None) -> SizeStats:
+    """Report the byte-size of a snapshot (``id`` given) or the whole store
+    (``id=None``). ASYNC.
+
+    Raises :class:`SnapdirError` (a :class:`StoreError` with code
+    ``"STORE_ERROR"``) on a missing-root store; an existing store with no
+    manifests resolves to all-zero stats.
+    """
+    ...

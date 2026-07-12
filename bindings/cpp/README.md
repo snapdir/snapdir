@@ -35,7 +35,7 @@ ships `build = false` and no header, so run `cbindgen`):
 
 ```sh
 # needs a Rust toolchain + cbindgen (`apk add rust cargo cbindgen` on Alpine)
-# fetch the snapdir-ffi 1.11.0 source, then:
+# fetch the snapdir-ffi 1.12.0 source, then:
 cargo build --release                       # -> target/release/libsnapdir_ffi.a
 cbindgen --config cbindgen.toml --crate snapdir-ffi --output snapdir.h .
 g++ -std=c++20 app.cpp -I. -L. -lsnapdir_ffi -lpthread -ldl -lm -o app

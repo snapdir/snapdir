@@ -15,7 +15,7 @@ plugins {
 }
 
 group   = "org.snapdir"
-version = "1.11.0"
+version = "1.12.0"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17

@@ -25,6 +25,39 @@
 // [`snapdir_error_free`] exactly once when done with an error.
 typedef struct SnapdirError SnapdirError;
 
+// Diffs two sets of stores and returns a JSON array of change entries.
+//
+// `from_uris` — NULL-terminated array of source store URIs.
+// `to_uris` — NULL-terminated array of destination store URIs.
+// `id` — optional 64-hex snapshot id (passed to [`snapdir_api::DiffOptions`];
+//         currently informational — the api unions all manifests per side).
+//         For a self-diff pass the same store on both sides; the union will be
+//         identical on each side, yielding an empty diff.
+//         For an A→B diff across two distinct stores, pass `NULL`.
+// `include_unchanged` — include unchanged entries in the output.
+// `on_conflict` — conflict policy: `"error"` or `"last-wins"` (`NULL` = `"error"`).
+// `err_out` — error out-parameter.
+//
+// Returns a freshly-allocated JSON string on success (caller frees with
+// [`snapdir_string_free`]), or `NULL` on failure (with `*err_out` set).
+//
+// JSON shape: `[{"status":"A","path":"./add.txt"}, ...]` where `status` is
+// one of `"A"` (Added), `"D"` (Deleted), `"M"` (Modified), `"="` (Unchanged).
+//
+// Byte-size counts for a snapshot or store — the C ABI mirror of
+// `snapdir_api::SizeStats`. Objects are stored uncompressed, so `physical_bytes`
+// equals the on-disk `.objects/` bytes.
+typedef struct SnapdirSizeStats {
+  // Σ of every file's size, duplicates counted — apparent content size.
+  uint64_t logical_bytes;
+  // Σ of size over UNIQUE content checksums — deduplicated on-disk footprint.
+  uint64_t physical_bytes;
+  // Number of file entries.
+  uint64_t files;
+  // Number of distinct content objects (unique checksums).
+  uint64_t objects;
+} SnapdirSizeStats;
+
 // Returns the ancestor chain for `id` as a JSON array.
 //
 // `id` — 64-hex snapshot id.
@@ -65,25 +98,6 @@ int snapdir_checkout_blocking(const char *id,
                               bool delete_extra,
                               struct SnapdirError **err_out);
 
-// Diffs two sets of stores and returns a JSON array of change entries.
-//
-// `from_uris` — NULL-terminated array of source store URIs.
-// `to_uris` — NULL-terminated array of destination store URIs.
-// `id` — optional 64-hex snapshot id (passed to [`snapdir_api::DiffOptions`];
-//         currently informational — the api unions all manifests per side).
-//         For a self-diff pass the same store on both sides; the union will be
-//         identical on each side, yielding an empty diff.
-//         For an A→B diff across two distinct stores, pass `NULL`.
-// `include_unchanged` — include unchanged entries in the output.
-// `on_conflict` — conflict policy: `"error"` or `"last-wins"` (`NULL` = `"error"`).
-// `err_out` — error out-parameter.
-//
-// Returns a freshly-allocated JSON string on success (caller frees with
-// [`snapdir_string_free`]), or `NULL` on failure (with `*err_out` set).
-//
-// JSON shape: `[{"status":"A","path":"./add.txt"}, ...]` where `status` is
-// one of `"A"` (Added), `"D"` (Deleted), `"M"` (Modified), `"="` (Unchanged).
-//
 // # Safety
 //
 // `from_uris` and `to_uris` must be NULL-terminated arrays of valid NUL-terminated
@@ -347,6 +361,21 @@ char *snapdir_push_blocking(const char *source_path,
 char *snapdir_revisions_json(const char *location,
                              const char *_catalog,
                              struct SnapdirError **err_out);
+
+// Reports the size of a snapshot (`id` non-NULL, 64-hex) or the whole store
+// (`id` NULL — deduplicated across every snapshot) at `store_uri`.
+//
+// Manifests-only: the object surface is never listed. On failure `*err_out` is
+// set (free with [`snapdir_error_free`]) and a zeroed struct is returned; on
+// success `*err_out` stays NULL.
+//
+// # Safety
+//
+// `store_uri` must be a valid non-NULL NUL-terminated C string; `id` may be NULL
+// or a valid NUL-terminated 64-hex string; `err_out` follows the usual rules.
+struct SnapdirSizeStats snapdir_size(const char *store_uri,
+                                     const char *id,
+                                     struct SnapdirError **err_out);
 
 // Stages the directory at `path` in the local cache and returns the snapshot id.
 //

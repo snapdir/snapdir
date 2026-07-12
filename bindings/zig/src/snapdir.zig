@@ -241,7 +241,7 @@ fn parseManifestText(
         };
 
         const perm = std.fmt.parseInt(u32, perm_str, 8) catch continue;
-        const size = std.fmt.parseInt(u64, size_str, 10) catch continue;
+        const entry_size = std.fmt.parseInt(u64, size_str, 10) catch continue;
 
         var checksum: [64]u8 = [_]u8{0} ** 64;
         if (chk_str.len <= 64) {
@@ -253,7 +253,7 @@ fn parseManifestText(
             .type     = pt,
             .perm     = perm,
             .checksum = checksum,
-            .size     = size,
+            .size     = entry_size,
             .path     = path_owned,
         });
     }
@@ -627,4 +627,90 @@ fn parseDiffJson(allocator: std.mem.Allocator, json: []const u8) ![]DiffEntry {
     }
 
     return entries.toOwnedSlice();
+}
+
+// ─── SizeStats + size + manifestSize ──────────────────────────────────────────
+
+/// SizeStats reports byte-size accounting for a snapshot or store (BigQuery
+/// nomenclature). Objects are stored uncompressed, so `physical_bytes` equals
+/// the on-disk `.objects/` byte total. All fields are plain `u64` values (no
+/// allocation; nothing to free).
+pub const SizeStats = struct {
+    /// Apparent content size — Σ of every file's size (duplicates counted).
+    logical_bytes: u64,
+    /// Deduplicated on-disk footprint — Σ size over unique content checksums.
+    physical_bytes: u64,
+    /// Number of file entries.
+    files: u64,
+    /// Number of distinct content objects (unique checksums).
+    objects: u64,
+};
+
+/// size reports the byte-size of a snapshot (`id` non-null) or the whole store
+/// (`id == null`). A missing-root `file://` store returns `error.StoreError`
+/// (not an empty store); an unknown scheme returns `error.InvalidStore`; an
+/// existing store with no manifests returns all-zero stats.
+///
+/// The `allocator` is accepted for signature symmetry with the other calls; the
+/// underlying C ABI returns the struct by value, so `size` performs no
+/// allocation.
+pub fn size(
+    allocator: std.mem.Allocator,
+    store_uri: [:0]const u8,
+    snapshot_id: ?[:0]const u8,
+) SnapdirError!SizeStats {
+    _ = allocator;
+    init();
+
+    var err_ptr: ?*c.SnapdirError = null;
+    const stats = c.snapdir_size(
+        store_uri.ptr,
+        if (snapshot_id) |s| s.ptr else null,
+        &err_ptr,
+    );
+    if (err_ptr != null) {
+        return mapError(err_ptr);
+    }
+    return SizeStats{
+        .logical_bytes  = stats.logical_bytes,
+        .physical_bytes = stats.physical_bytes,
+        .files          = stats.files,
+        .objects        = stats.objects,
+    };
+}
+
+/// manifestSize computes the SizeStats of an already-loaded Manifest (sync,
+/// pure): `logical_bytes` sums file sizes (duplicates counted); `physical_bytes`
+/// sums size over unique content checksums (the deduplicated footprint). The
+/// allocator backs the dedup set; the only error is `OutOfMemory`.
+pub fn manifestSize(
+    allocator: std.mem.Allocator,
+    m: Manifest,
+) SnapdirError!SizeStats {
+    var logical:  u64 = 0;
+    var files:    u64 = 0;
+    var physical: u64 = 0;
+    var objects:  u64 = 0;
+
+    var seen = std.AutoHashMap([64]u8, void).init(allocator);
+    defer seen.deinit();
+
+    for (m.entries) |entry| {
+        if (entry.type == .File) {
+            logical += entry.size;
+            files += 1;
+            const gop = try seen.getOrPut(entry.checksum);
+            if (!gop.found_existing) {
+                physical += entry.size;
+                objects += 1;
+            }
+        }
+    }
+
+    return SizeStats{
+        .logical_bytes  = logical,
+        .physical_bytes = physical,
+        .files          = files,
+        .objects        = objects,
+    };
 }

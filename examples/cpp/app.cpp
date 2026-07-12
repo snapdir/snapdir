@@ -9,6 +9,7 @@
 //   app pull <id>  <store> <dest>       → materialises snapshot into dest
 //   app id   <dir>                      → prints the 64-hex snapshot id
 //   app diff <store@id_a> <store@id_b>  → prints STATUS<TAB>PATH per line
+//   app size <store> [<snapshot_id>]    → prints "logical physical files objects"
 //
 // Compile: g++ -std=c++20 app.cpp -I. -L. -lsnapdir_ffi -lpthread -ldl -lm -o app
 
@@ -33,7 +34,7 @@ static std::pair<std::string, std::string> parseRef(const std::string &ref) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        std::cerr << "usage: app {push|pull|id|diff} [args...]\n";
+        std::cerr << "usage: app {push|pull|id|diff|size} [args...]\n";
         return 1;
     }
 
@@ -91,6 +92,13 @@ int main(int argc, char *argv[]) {
 
             // Cleanup (best effort; container exits anyway).
             fs::remove_all(tmp);
+
+        } else if (cmd == "size") {
+            // size <store> [<snapshot_id>] — report store/snapshot byte-size accounting.
+            std::string store{argv[2]};
+            std::optional<std::string> id_opt = (argc > 3) ? std::optional<std::string>{argv[3]} : std::nullopt;
+            auto s = snapdir::size(store, id_opt).get();
+            std::cout << s.logical_bytes << ' ' << s.physical_bytes << ' ' << s.files << ' ' << s.objects << '\n';
 
         } else {
             std::cerr << "unknown command: " << cmd << '\n';

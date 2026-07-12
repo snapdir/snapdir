@@ -1446,6 +1446,92 @@ pub unsafe extern "C" fn snapdir_verify_blocking(
 /// JSON shape: `[{"status":"A","path":"./add.txt"}, ...]` where `status` is
 /// one of `"A"` (Added), `"D"` (Deleted), `"M"` (Modified), `"="` (Unchanged).
 ///
+/// Byte-size counts for a snapshot or store — the C ABI mirror of
+/// `snapdir_api::SizeStats`. Objects are stored uncompressed, so `physical_bytes`
+/// equals the on-disk `.objects/` bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SnapdirSizeStats {
+    /// Σ of every file's size, duplicates counted — apparent content size.
+    pub logical_bytes: u64,
+    /// Σ of size over UNIQUE content checksums — deduplicated on-disk footprint.
+    pub physical_bytes: u64,
+    /// Number of file entries.
+    pub files: u64,
+    /// Number of distinct content objects (unique checksums).
+    pub objects: u64,
+}
+
+/// Reports the size of a snapshot (`id` non-NULL, 64-hex) or the whole store
+/// (`id` NULL — deduplicated across every snapshot) at `store_uri`.
+///
+/// Manifests-only: the object surface is never listed. On failure `*err_out` is
+/// set (free with [`snapdir_error_free`]) and a zeroed struct is returned; on
+/// success `*err_out` stays NULL.
+///
+/// # Safety
+///
+/// `store_uri` must be a valid non-NULL NUL-terminated C string; `id` may be NULL
+/// or a valid NUL-terminated 64-hex string; `err_out` follows the usual rules.
+#[no_mangle]
+pub unsafe extern "C" fn snapdir_size(
+    store_uri: *const c_char,
+    id: *const c_char,
+    err_out: *mut *mut SnapdirError,
+) -> SnapdirSizeStats {
+    catch_entry_unwind_safe(
+        || {
+            // SAFETY: cstr_to_str handles NULL gracefully.
+            let store_str = match unsafe { cstr_to_str(store_uri, "store_uri", err_out) } {
+                Some(s) => s.to_owned(),
+                None => {
+                    if err_out.is_null() || unsafe { (*err_out).is_null() } {
+                        let api_err = snapdir_api::SnapdirError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "parameter `store_uri` must not be NULL",
+                        ));
+                        unsafe { ffi_write_api_error(&api_err, err_out) };
+                    }
+                    return SnapdirSizeStats::default();
+                }
+            };
+            let store = match snapdir_api::StoreUri::parse(&store_str) {
+                Ok(u) => u,
+                Err(e) => {
+                    unsafe { ffi_write_api_error(&e, err_out) };
+                    return SnapdirSizeStats::default();
+                }
+            };
+            // id: NULL = whole store; non-NULL = one snapshot.
+            // SAFETY: id may be NULL (documented).
+            let snap_id = match unsafe { cstr_to_str(id, "id", err_out) } {
+                Some(hex) => match snapdir_api::SnapshotId::from_hex(hex) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        unsafe { ffi_write_api_error(&e, err_out) };
+                        return SnapdirSizeStats::default();
+                    }
+                },
+                None => None,
+            };
+            match shared_rt().block_on(snapdir_api::size(&store, snap_id.as_ref())) {
+                Ok(s) => SnapdirSizeStats {
+                    logical_bytes: s.logical_bytes,
+                    physical_bytes: s.physical_bytes,
+                    files: s.files,
+                    objects: s.objects,
+                },
+                Err(e) => {
+                    unsafe { ffi_write_api_error(&e, err_out) };
+                    SnapdirSizeStats::default()
+                }
+            }
+        },
+        SnapdirSizeStats::default(),
+        err_out,
+    )
+}
+
 /// # Safety
 ///
 /// `from_uris` and `to_uris` must be NULL-terminated arrays of valid NUL-terminated

@@ -705,3 +705,8 @@ test "idFromManifest borrows the Manifest (deinit remains the sole owner; checks
     }
     try testing.expect(matched); // same file → same 64-hex checksum on re-walk
 }
+
+// Pull in the size tests (build.zig's test root is this file).
+test {
+    _ = @import("zig_size.zig");
+}

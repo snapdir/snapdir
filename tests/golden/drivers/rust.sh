@@ -45,6 +45,14 @@ locate_oracle() {
 
 ORACLE="$(locate_oracle)"
 
+# The harness sets SNAPDIR_NO_PROGRESS=1 (truthy) but the oracle's clap
+# frontend requires true/false for this env var; normalize it so oracle calls
+# never fail with "invalid value '1' for '--no-progress'".
+case "${SNAPDIR_NO_PROGRESS:-}" in
+    1|yes|on)   export SNAPDIR_NO_PROGRESS=true  ;;
+    0|no|off)   export SNAPDIR_NO_PROGRESS=false ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Dispatch subcommand.
 # ---------------------------------------------------------------------------
@@ -140,9 +148,22 @@ case "${SUBCMD}" in
         exec "${ORACLE}" pull --no-progress --store "${store_uri}" --id "${snap_id}" "${dest}"
         ;;
 
+    size)
+        # rust.sh size <store_uri> [<snapshot_id>]  → 4 lines via the oracle JSON.
+        store_uri="$1"; snap_id="${2:-}"
+        if [[ -n "${snap_id}" ]]; then
+            json="$("${ORACLE}" size --no-progress --store "${store_uri}" --id "${snap_id}" --json)"
+        else
+            json="$("${ORACLE}" size --no-progress --store "${store_uri}" --json)"
+        fi
+        for k in logical_bytes physical_bytes files objects; do
+            printf '%s\n' "$(printf '%s' "${json}" | grep -oE "\"${k}\"[[:space:]]*:[[:space:]]*[0-9]+" | grep -oE '[0-9]+$' | head -1)"
+        done
+        ;;
+
     *)
         echo "[rust.sh] ERROR: unknown subcommand '${SUBCMD}'" >&2
-        echo "Usage: rust.sh {manifest|id|push|fetch|checkout} <args...>" >&2
+        echo "Usage: rust.sh {manifest|id|push|fetch|checkout|size} <args...>" >&2
         exit 1
         ;;
 esac

@@ -23,6 +23,7 @@
 set -euo pipefail
 
 GOLDEN_ID_A="${GOLDEN_ID_A:-9e12678a4ba37d1fb6864842b02e8b306c70ba1793479dc71bab12cc21f0703b}"
+GOLDEN_SIZE="${GOLDEN_SIZE:-52 52 4 4}"
 
 if [ "$#" -lt 1 ]; then
   echo "usage: verify_published_smoke.sh <app-invoke-prefix...>" >&2
@@ -64,6 +65,17 @@ assert_id() {
   echo "ok[$label]: $got"
 }
 
+assert_size() {
+  local label="$1" got="$2"
+  if [ "$got" != "$GOLDEN_SIZE" ]; then
+    echo "FAIL[$label]: size mismatch" >&2
+    echo "  expected (golden): $GOLDEN_SIZE" >&2
+    echo "  got:               $got" >&2
+    exit 1
+  fi
+  echo "ok[$label]: $got"
+}
+
 echo "== verify-published smoke: ${APP[*]} =="
 
 # 1) id(seed) must equal the canonical golden id (pure hashing, no store).
@@ -78,5 +90,13 @@ assert_id "push(seed)" "$pushed"
 "${APP[@]}" pull "$pushed" "file://$store" "$out"
 id_out="$("${APP[@]}" id "$out")"
 assert_id "id(pulled)" "$id_out"
+
+# 4) size(store, id) — byte-size accounting for the pushed snapshot.
+size_by_id="$("${APP[@]}" size "file://$store" "$pushed")"
+assert_size "size(by-id)" "$size_by_id"
+
+# 5) size(store) whole-store leg — no id; must equal the by-id figure (one snapshot).
+size_whole="$("${APP[@]}" size "file://$store")"
+assert_size "size(whole-store)" "$size_whole"
 
 echo "SMOKE_OK ${APP[*]}"

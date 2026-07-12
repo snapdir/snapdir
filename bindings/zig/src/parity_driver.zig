@@ -115,6 +115,13 @@ pub fn main() !void {
         // checkout <id> <store_uri> <dest> → pull(id, store, dest)
         if (rest.len < 3) die("checkout requires <id> <store_uri> <dest>", .{});
         snapdir.pull(allocator, rest[0], rest[1], rest[2], .{}) catch |e| die("checkout failed: {s}", .{@errorName(e)});
+    } else if (std.mem.eql(u8, sub, "size")) {
+        if (rest.len < 1) die("size requires <store_uri>", .{});
+        const store_z = rest[0];
+        const id_z: ?[:0]const u8 = if (rest.len > 1) rest[1] else null;
+        const s = try snapdir.size(allocator, store_z, id_z);
+        const stdout = std.io.getStdOut().writer();
+        try stdout.print("{d}\n{d}\n{d}\n{d}\n", .{ s.logical_bytes, s.physical_bytes, s.files, s.objects });
     } else {
         die("unknown subcommand {s}", .{sub});
     }

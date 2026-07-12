@@ -43,6 +43,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -800,6 +801,405 @@ static void test_version() {
     CHECK(!v.empty(), "version() must be non-empty");
 }
 
+// ─── size tests (Phase 46, folded from .gatesmith/pending-tests/cpp_size.cpp) ─
+//
+// Deterministic fixture (mirrors the Rust api test for cross-binding parity):
+//   seed/a/x.txt   = "hello world\n"      (12 bytes)
+//   seed/b/dup.txt = "hello world\n"      (12 bytes — DUPLICATE content of x.txt)
+//   seed/a/y.txt   = "unique data here\n" (17 bytes)
+// ⇒ files=3, objects=2, logical_bytes=41 (12+12+17), physical_bytes=29 (12+17).
+static const std::uint64_t kExpFiles    = 3;
+static const std::uint64_t kExpObjects  = 2;
+static const std::uint64_t kExpLogical  = 41;
+static const std::uint64_t kExpPhysical = 29;
+
+// The seed's shared 12-byte content; snapshot B (below) reuses it verbatim so
+// its checksum collides with seed/a/x.txt — the lever for cross-snapshot dedup.
+static const std::string kSharedContent = "hello world\n";         // 12 bytes
+// A content object that exists ONLY in snapshot B (a new distinct checksum).
+static const std::string kBFreshContent = "second snapshot only\n";
+
+static fs::path build_seed_tree(const fs::path &seed) {
+    fs::create_directories(seed / "a");
+    fs::create_directories(seed / "b");
+    { std::ofstream(seed / "a" / "x.txt")   << "hello world\n"; }      // 12 bytes
+    { std::ofstream(seed / "b" / "dup.txt") << "hello world\n"; }      // 12 (dup)
+    { std::ofstream(seed / "a" / "y.txt")   << "unique data here\n"; } // 17 bytes
+    ::chmod((seed / "a" / "x.txt").c_str(),   0644);
+    ::chmod((seed / "b" / "dup.txt").c_str(), 0644);
+    ::chmod((seed / "a" / "y.txt").c_str(),   0644);
+    return seed;
+}
+
+// Snapshot B: shares ONE content object with the seed (kSharedContent) and adds
+// ONE brand-new object (kBFreshContent). Pushing seed + seed2 into the same
+// store exercises whole-store dedup ACROSS snapshots, not just within one.
+static fs::path build_seed2_tree(const fs::path &seed2) {
+    fs::create_directories(seed2);
+    { std::ofstream(seed2 / "reuse.txt") << kSharedContent; } // dup of seed's hello-world object
+    { std::ofstream(seed2 / "fresh.txt") << kBFreshContent; } // a new, unique object
+    ::chmod((seed2 / "reuse.txt").c_str(), 0644);
+    ::chmod((seed2 / "fresh.txt").c_str(), 0644);
+    return seed2;
+}
+
+// Recursive on-disk byte total of a directory subtree (regular files only).
+static std::uint64_t on_disk_bytes(const fs::path &dir) {
+    std::uint64_t total = 0;
+    std::error_code ec;
+    if (!fs::exists(dir, ec)) return 0;
+    for (auto it = fs::recursive_directory_iterator(
+             dir, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        std::error_code fec;
+        if (it->is_regular_file(fec) && !fec) {
+            const auto sz = it->file_size(fec);
+            if (!fec) total += static_cast<std::uint64_t>(sz);
+        }
+    }
+    return total;
+}
+
+// The filesystem path a "file://<path>" store URI points at.
+static fs::path store_path_of(const std::string &store_uri) {
+    const std::string prefix = "file://";
+    return fs::path(store_uri.substr(prefix.size()));
+}
+
+// ─── 1. manifest_size on a LOCAL manifest pins dedup-by-checksum ─────────────
+static void test_manifest_size(const fs::path &seed) {
+    snapdir::Manifest m = snapdir::manifest(seed);
+    CHECK(!m.entries.empty(), "seed manifest must have entries");
+
+    snapdir::SizeStats s = snapdir::manifest_size(m);
+    CHECK(s.files == kExpFiles,          "manifest_size.files must be 3 (File entries)");            // clause: files
+    CHECK(s.objects == kExpObjects,      "manifest_size.objects must be 2 (distinct checksums)");    // clause: objects
+    CHECK(s.logical_bytes == kExpLogical,"manifest_size.logical_bytes must be 41 (dups counted)");   // clause: logical_bytes
+    CHECK(s.physical_bytes == kExpPhysical,
+          "manifest_size.physical_bytes must be 29 (deduped by checksum)");                          // clause: physical_bytes
+}
+
+// ─── 2. size(store, id) of a single pushed snapshot == the local figure ──────
+static void test_size_single_snapshot(const fs::path &seed, const fs::path &root) {
+    const std::string store =
+        "file://" + (root / "store-single").string();
+
+    std::string id;
+    try {
+        id = snapdir::push(seed, store).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("push(seed) threw: ") + e.what()).c_str());
+        return;
+    }
+    CHECK(is_hex64(id), "push id must be 64-hex");
+
+    snapdir::SizeStats s;
+    try {
+        s = snapdir::size(store, std::optional<std::string>(id)).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("size(store,id).get() threw: ") + e.what()).c_str());
+        return;
+    }
+    CHECK(s.files == kExpFiles,           "size(store,id).files must be 3");                 // clause: single-snapshot == manifest_size
+    CHECK(s.objects == kExpObjects,       "size(store,id).objects must be 2");
+    CHECK(s.logical_bytes == kExpLogical, "size(store,id).logical_bytes must be 41");
+    CHECK(s.physical_bytes == kExpPhysical,
+          "size(store,id).physical_bytes must be 29");
+}
+
+// ─── 3. size(store, nullopt) folds the WHOLE store ───────────────────────────
+static void test_size_whole_store_nullopt(const fs::path &seed, const fs::path &root) {
+    const std::string store =
+        "file://" + (root / "store-whole").string();
+
+    std::string id;
+    try {
+        id = snapdir::push(seed, store).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("push(seed) threw: ") + e.what()).c_str());
+        return;
+    }
+
+    snapdir::SizeStats by_id, whole;
+    try {
+        by_id = snapdir::size(store, std::optional<std::string>(id)).get();
+        whole = snapdir::size(store, std::nullopt).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("size() threw: ") + e.what()).c_str());
+        return;
+    }
+    CHECK(whole.files == by_id.files,                 "nullopt fold files must equal single-snapshot files");        // clause: nullopt = whole-store fold
+    CHECK(whole.objects == by_id.objects,             "nullopt fold objects must equal single-snapshot objects");
+    CHECK(whole.logical_bytes == by_id.logical_bytes, "nullopt fold logical must equal single-snapshot logical");
+    CHECK(whole.physical_bytes == by_id.physical_bytes,
+          "nullopt fold physical must equal single-snapshot physical");
+    // And the absolute figure, to pin it to the fixture, not just to itself.
+    CHECK(whole.physical_bytes == kExpPhysical, "whole-store physical_bytes must be 29");
+}
+
+// ─── 4. ACCEPTANCE: physical_bytes == on-disk .objects/ bytes ────────────────
+static void test_physical_equals_on_disk_objects(const fs::path &seed, const fs::path &root) {
+    const std::string store =
+        "file://" + (root / "store-acceptance").string();
+
+    try {
+        snapdir::push(seed, store).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("push(seed) threw: ") + e.what()).c_str());
+        return;
+    }
+
+    snapdir::SizeStats s;
+    try {
+        s = snapdir::size(store, std::nullopt).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("size(store,nullopt).get() threw: ") + e.what()).c_str());
+        return;
+    }
+
+    const fs::path objects_dir = store_path_of(store) / ".objects";
+    CHECK(fs::exists(objects_dir), "file:// store must have a .objects/ directory after push");
+    const std::uint64_t disk = on_disk_bytes(objects_dir);
+    CHECK(disk > 0, "on-disk .objects/ byte total must be > 0");
+    CHECK(s.physical_bytes == disk,
+          "physical_bytes MUST equal the recursive on-disk .objects/ byte total (uncompressed)"); // clause: ACCEPTANCE
+    // And that on-disk total is the fixture's deduped 29 bytes.
+    CHECK(disk == kExpPhysical, "on-disk .objects/ total must be 29 (deduped, uncompressed)");
+}
+
+// ─── 5. dedup actually happened: logical > physical, objects < files ─────────
+static void test_dedup_strict_inequalities(const fs::path &seed) {
+    snapdir::SizeStats s = snapdir::manifest_size(snapdir::manifest(seed));
+    CHECK(s.logical_bytes > s.physical_bytes,
+          "logical_bytes must be STRICTLY greater than physical_bytes (dedup happened)"); // clause: dedup strict
+    CHECK(s.objects < s.files,
+          "objects must be STRICTLY fewer than files (a duplicate collapsed)");           // clause: objects < files
+}
+
+// ─── 6. throw-on-bad-store: size() of an unopenable store re-throws ──────────
+static void test_size_bad_store_throws() {
+    bool threw = false;
+    try {
+        snapdir::SizeStats s =
+            snapdir::size("file:///nonexistent/definitely/missing", std::nullopt).get();
+        (void)s; // unreachable on the contract
+    } catch (const snapdir::Error &e) {
+        threw = true;
+        CHECK(std::strlen(e.what()) > 0, "size(bad).what() must be non-empty on throw");
+        CHECK(is_stable_code(e.code()),  "size(bad).code() must be a stable ABI code");   // clause: throw-on-bad-store
+    } catch (...) {
+        CHECK(false, "size(bad store).get() threw a non-snapdir::Error type");
+    }
+    CHECK(threw, "size() of an unopenable store MUST re-throw snapdir::Error from .get()");
+}
+
+// ─── 7. edge: empty/degenerate manifest ⇒ all-zero stats, no throw ───────────
+static void test_empty_manifest_all_zeros(const fs::path &root) {
+    const fs::path empty = root / "empty-seed";
+    fs::create_directories(empty); // a directory tree with zero files
+    snapdir::Manifest m = snapdir::manifest(empty);
+    snapdir::SizeStats s = snapdir::manifest_size(m);
+    CHECK(s.files == 0,          "empty tree ⇒ files == 0");           // clause: empty ⇒ all-zeros
+    CHECK(s.objects == 0,        "empty tree ⇒ objects == 0");
+    CHECK(s.logical_bytes == 0,  "empty tree ⇒ logical_bytes == 0");
+    CHECK(s.physical_bytes == 0, "empty tree ⇒ physical_bytes == 0");
+}
+
+// ─── 8. future/RAII no-leak on the throw path (ASan/UBSan bar) ───────────────
+static void test_size_future_throw_no_leak() {
+    int thrown = 0;
+    for (int i = 0; i < 100; ++i) {
+        bool caught = false;
+        try {
+            snapdir::SizeStats s =
+                snapdir::size("file:///no/such/store/for/size/leak", std::nullopt).get();
+            (void)s;
+        } catch (const snapdir::Error &e) {
+            caught = true;
+            ++thrown;
+            CHECK(std::strlen(e.what()) > 0,
+                  "async size Error::what() must be non-empty on the .get() re-throw");
+            CHECK(is_stable_code(e.code()),
+                  "async size(bad).get() code must be a stable ABI code (no UAF)");
+        } catch (...) {
+            CHECK(false, "async size(bad).get() threw a non-snapdir::Error type");
+        }
+        CHECK(caught, "every size(bad).get() MUST re-throw snapdir::Error");
+    }
+    CHECK(thrown == 100, "every iteration of the size throw loop must have thrown"); // clause: RAII/ASan-clean
+}
+
+// ─── 9. (tests-review) directories are present in the manifest but NOT counted ─
+//
+// Impl-revealed: manifest_size does `if (e.type != PathType::File) continue;`.
+// The seed has subdirectories a/ and b/, so its manifest MUST carry Directory
+// entries — that is exactly what exercises the non-File skip branch. snapdir
+// directory entries are NOT inert: they carry a real Merkle subtree checksum
+// and a CUMULATIVE subtree size (e.g. "./" size 41). That is precisely why the
+// skip is load-bearing: were directories counted, logical would balloon to
+// 41 + Σ(dir subtree sizes) and objects would count the directory hashes. Pin
+// that these substantial directory entries are present yet contribute nothing.
+static void test_manifest_size_directory_excluded(const fs::path &seed) {
+    snapdir::Manifest m = snapdir::manifest(seed);
+    std::uint64_t dir_entries = 0, dir_size_sum = 0;
+    bool saw_dir_with_content = false;
+    for (const auto &e : m.entries) {
+        if (e.type == snapdir::PathType::Directory) {
+            ++dir_entries;
+            dir_size_sum += e.size;
+            // A directory entry carries a real subtree hash + cumulative size,
+            // so it WOULD corrupt the count if the != File skip were removed.
+            if (!e.checksum.empty() && e.size > 0) saw_dir_with_content = true;
+        }
+    }
+    CHECK(dir_entries > 0, "seed manifest must contain at least one Directory entry (a/, b/)");      // clause: dirs present
+    CHECK(saw_dir_with_content,
+          "a Directory entry must carry a non-empty subtree checksum and non-zero size");            // clause: dirs look like content
+    snapdir::SizeStats s = snapdir::manifest_size(m);
+    CHECK(s.files == kExpFiles,     "directories must NOT count toward files");                      // clause: dirs excluded (files)
+    CHECK(s.objects == kExpObjects, "directories must NOT count toward objects");                    // clause: dirs excluded (objects)
+    // The decisive byte check: logical stays 41 and does NOT absorb the sizeable
+    // directory subtree sizes — proving the skip excludes directory bytes.
+    CHECK(dir_size_sum > 0, "directory subtree sizes must be non-zero (skip is meaningful)");
+    CHECK(s.logical_bytes == kExpLogical,
+          "logical_bytes must stay 41 (directory subtree sizes must NOT be added)");                 // clause: dir bytes excluded
+    CHECK(s.logical_bytes < kExpLogical + dir_size_sum,
+          "logical must be STRICTLY less than files+dirs size sum (directories dropped)");           // clause: dirs strictly dropped
+    CHECK(m.entries.size() > s.files,
+          "manifest must hold MORE entries than files (directory entries present, uncounted)");      // clause: entries > files
+}
+
+// ─── 10. (tests-review) TWO-snapshot store: dedup ACROSS snapshots + id select ─
+//
+// Push snapshot A (seed) and snapshot B (seed2 — shares one object with A, adds
+// one new object) into the SAME store. Pins: (a) per-id selection — size(store,
+// idA) is A's own figure, size(store, idB) is B's, NOT the whole store; (b) the
+// whole-store fold unions BOTH manifests and dedups the shared object ACROSS
+// snapshots (physical counts the shared 12 bytes ONCE); (c) whole physical ==
+// on-disk .objects/ across snapshots; (d) re-run determinism.
+static void test_two_snapshot_cross_dedup(const fs::path &seed, const fs::path &root) {
+    const fs::path   seed2 = build_seed2_tree(root / "seed2");
+    const std::string store = "file://" + (root / "store-multi").string();
+
+    std::string idA, idB;
+    try {
+        idA = snapdir::push(seed,  store).get();
+        idB = snapdir::push(seed2, store).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("push(A/B) threw: ") + e.what()).c_str());
+        return;
+    }
+    CHECK(is_hex64(idA) && is_hex64(idB), "both snapshot ids must be 64-hex");
+    CHECK(idA != idB, "two distinct trees must yield two distinct snapshot ids");                // clause: distinct ids
+
+    const std::uint64_t lenShared = static_cast<std::uint64_t>(kSharedContent.size()); // 12
+    const std::uint64_t lenFresh  = static_cast<std::uint64_t>(kBFreshContent.size());
+    // Snapshot B alone: 2 files, 2 distinct checksums within B.
+    const std::uint64_t expFilesB    = 2;
+    const std::uint64_t expObjectsB  = 2;
+    const std::uint64_t expLogicalB  = lenShared + lenFresh;
+    const std::uint64_t expPhysicalB = lenShared + lenFresh;
+
+    snapdir::SizeStats sA, sB, whole, whole2;
+    try {
+        sA     = snapdir::size(store, std::optional<std::string>(idA)).get();
+        sB     = snapdir::size(store, std::optional<std::string>(idB)).get();
+        whole  = snapdir::size(store, std::nullopt).get();
+        whole2 = snapdir::size(store, std::nullopt).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("size() threw: ") + e.what()).c_str());
+        return;
+    }
+
+    // (a) per-id selection: idA yields A's own figure, NOT the union.
+    CHECK(sA.files == kExpFiles && sA.objects == kExpObjects &&
+          sA.logical_bytes == kExpLogical && sA.physical_bytes == kExpPhysical,
+          "size(store,idA) must equal snapshot A's own size, not the whole store");              // clause: id A selects A
+    CHECK(sB.files == expFilesB,            "size(store,idB).files must be 2 (B's own entries)"); // clause: id B selects B
+    CHECK(sB.objects == expObjectsB,        "size(store,idB).objects must be 2 (B's checksums)");
+    CHECK(sB.logical_bytes == expLogicalB,  "size(store,idB).logical must be reuse+fresh bytes");
+    CHECK(sB.physical_bytes == expPhysicalB,"size(store,idB).physical must be reuse+fresh bytes");
+
+    // (b) whole-store fold unions BOTH manifests, deduped by checksum across them.
+    const std::uint64_t expFilesWhole    = kExpFiles + expFilesB;     // 5 File entries total
+    const std::uint64_t expObjectsWhole  = 3;                         // {hello, unique, fresh}
+    const std::uint64_t expLogicalWhole  = kExpLogical + expLogicalB; // dups counted across snapshots
+    const std::uint64_t expPhysicalWhole = kExpPhysical + lenFresh;   // hello counted ONCE across snapshots
+
+    CHECK(whole.files == expFilesWhole,   "whole-store files must sum File entries across BOTH manifests"); // clause: union files
+    CHECK(whole.objects == expObjectsWhole,"whole-store objects must be 3 distinct checksums across both");  // clause: cross-snap distinct objects
+    CHECK(whole.logical_bytes == expLogicalWhole,
+          "whole-store logical must be ΣA + ΣB logical (dups counted across snapshots)");                    // clause: union logical
+    CHECK(whole.physical_bytes == expPhysicalWhole,
+          "whole-store physical must dedup the shared object ACROSS snapshots (hello once)");                // clause: cross-snap dedup
+
+    // Cross-snapshot dedup is STRICTLY observable: shared object not doubled.
+    CHECK(whole.physical_bytes < sA.physical_bytes + sB.physical_bytes,
+          "whole physical must be STRICTLY < Σper-snapshot physical (shared object deduped)");               // clause: cross-snap dedup strict
+
+    // (c) ACCEPTANCE across snapshots: whole physical == on-disk .objects/ bytes.
+    const fs::path objects_dir = store_path_of(store) / ".objects";
+    const std::uint64_t disk = on_disk_bytes(objects_dir);
+    CHECK(disk == expPhysicalWhole,
+          "on-disk .objects/ total must equal the cross-snapshot deduped physical bytes");                  // clause: multi-snap acceptance
+    CHECK(whole.physical_bytes == disk,
+          "whole-store physical_bytes MUST equal the recursive on-disk .objects/ byte total");
+
+    // (d) determinism: a repeated whole-store fold yields identical stats.
+    CHECK(whole.files == whole2.files && whole.objects == whole2.objects &&
+          whole.logical_bytes == whole2.logical_bytes &&
+          whole.physical_bytes == whole2.physical_bytes,
+          "size(store,nullopt) must be deterministic across repeated calls");                               // clause: determinism
+}
+
+// ─── 11. (tests-review) EMPTY store ⇒ all-zeros, NO throw ────────────────────
+//
+// An EXISTING store directory with no snapshots pushed. The whole-store fold
+// must return all-zero stats and MUST NOT throw — this is the legitimate-empty
+// branch, distinct from the missing/unopenable store that DOES throw (test 6).
+static void test_size_empty_store_all_zeros(const fs::path &root) {
+    const fs::path empty_store_dir = root / "empty-store";
+    fs::create_directories(empty_store_dir);
+    const std::string store = "file://" + empty_store_dir.string();
+
+    snapdir::SizeStats s{1, 1, 1, 1}; // poison; must be overwritten to zeros
+    try {
+        s = snapdir::size(store, std::nullopt).get();
+    } catch (const snapdir::Error &e) {
+        CHECK(false, (std::string("size(empty store,nullopt) threw: ") + e.what()).c_str());
+        return;
+    }
+    CHECK(s.files == 0 && s.objects == 0 &&
+          s.logical_bytes == 0 && s.physical_bytes == 0,
+          "an existing store with no snapshots must fold to all-zero stats, no throw"); // clause: empty store zeros
+}
+
+// ─── 12. (tests-review) malformed / unsupported store URIs still throw ───────
+//
+// Beyond the missing file:// path (test 6): a URI with no scheme and a URI with
+// a valid but unsupported scheme must BOTH throw snapdir::Error with a stable
+// code — never return bogus zero stats.
+static void test_size_bad_uri_variants_throw() {
+    const char *bad_uris[] = {
+        "not-a-store-uri-at-all", // no scheme / no "://"
+        "bogus://whatever/store", // well-formed but unsupported adapter
+    };
+    for (const char *uri : bad_uris) {
+        bool threw = false;
+        try {
+            snapdir::SizeStats s = snapdir::size(uri, std::nullopt).get();
+            (void)s;
+        } catch (const snapdir::Error &e) {
+            threw = true;
+            CHECK(std::strlen(e.what()) > 0, "bad-URI size().what() must be non-empty");
+            CHECK(is_stable_code(e.code()),  "bad-URI size().code() must be a stable ABI code"); // clause: bad-URI throws
+        } catch (...) {
+            CHECK(false, "size(bad URI) threw a non-snapdir::Error type");
+        }
+        CHECK(threw, "size() of a malformed/unsupported store URI MUST throw snapdir::Error");
+    }
+}
+
 int main() {
     // Hermetic + offline: route the cache + catalog into a private temp root so
     // the test never touches the real cache and never hits the network.
@@ -811,6 +1211,7 @@ int main() {
     ::setenv("SNAPDIR_CATALOG_DB_PATH", catalog.c_str(), 1);
 
     const fs::path tree = build_tree(root / "tree");
+    const fs::path seed = build_seed_tree(root / "seed");
 
     // The paramount axis first, then behaviour.
     test_version();
@@ -828,6 +1229,20 @@ int main() {
     test_error_code_exactness(tree, root);
     test_filesystem_path_edge_cases(root);
     test_diff_json_per_object_pairing(root);
+    // Phase 46: size surface (folded from .gatesmith/pending-tests/cpp_size.cpp)
+    test_manifest_size(seed);                         // 1
+    test_size_single_snapshot(seed, root);            // 2
+    test_size_whole_store_nullopt(seed, root);        // 3
+    test_physical_equals_on_disk_objects(seed, root); // 4 (ACCEPTANCE)
+    test_dedup_strict_inequalities(seed);             // 5
+    test_size_bad_store_throws();                     // 6
+    test_empty_manifest_all_zeros(root);              // 7
+    test_size_future_throw_no_leak();                 // 8
+    // Phase-46 tests-review hardening (impl-revealed branches):
+    test_manifest_size_directory_excluded(seed);      // 9  directories excluded
+    test_two_snapshot_cross_dedup(seed, root);        // 10 cross-snapshot dedup + per-id + determinism
+    test_size_empty_store_all_zeros(root);            // 11 empty store ⇒ zeros, no throw
+    test_size_bad_uri_variants_throw();               // 12 malformed/unsupported URIs throw
 
     // Clean up the private temp root (best-effort; valgrind cares about heap,
     // not the FS).

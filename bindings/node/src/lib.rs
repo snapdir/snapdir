@@ -132,6 +132,82 @@ fn api_manifest_to_napi(m: snapdir_api::Manifest) -> Manifest {
 }
 
 // ---------------------------------------------------------------------------
+// SizeStats + size() + manifestSize()
+// ---------------------------------------------------------------------------
+
+/// Byte-size accounting for a snapshot or store (BigQuery nomenclature).
+///
+/// All fields are `bigint` (`u64`) — a store can exceed
+/// `Number.MAX_SAFE_INTEGER`. Objects are stored uncompressed, so
+/// `physicalBytes` equals the on-disk `.objects/` byte total.
+#[napi(object)]
+pub struct SizeStats {
+    /// Apparent content size — Σ of every file's size (duplicates counted).
+    #[napi(js_name = "logicalBytes")]
+    pub logical_bytes: BigInt,
+    /// Deduplicated on-disk footprint — Σ size over unique content checksums.
+    #[napi(js_name = "physicalBytes")]
+    pub physical_bytes: BigInt,
+    /// Number of file entries.
+    pub files: BigInt,
+    /// Number of distinct content objects (unique checksums).
+    pub objects: BigInt,
+}
+
+fn api_size_stats_to_napi(s: snapdir_api::SizeStats) -> SizeStats {
+    SizeStats {
+        logical_bytes: BigInt::from(s.logical_bytes),
+        physical_bytes: BigInt::from(s.physical_bytes),
+        files: BigInt::from(s.files),
+        objects: BigInt::from(s.objects),
+    }
+}
+
+/// Reports the byte-size of a snapshot (`id` given) or the whole store
+/// (`id` omitted). ASYNC — I/O-bound.
+///
+/// Rejects with a `SnapdirError` on a bad store: a missing-root `file://`
+/// store yields `STORE_ERROR` (not empty), an unknown scheme yields
+/// `INVALID_STORE`. An existing store with no manifests resolves to zeros.
+#[napi]
+pub async fn size(store_uri: String, id: Option<String>) -> napi::Result<SizeStats> {
+    let store = api_result(snapdir_api::StoreUri::parse(&store_uri))?;
+    let sid = match id {
+        Some(hex) => Some(api_result(snapdir_api::SnapshotId::from_hex(&hex))?),
+        None => None,
+    };
+    let stats = api_result(snapdir_api::size(&store, sid.as_ref()).await)?;
+    Ok(api_size_stats_to_napi(stats))
+}
+
+/// Computes the [`SizeStats`] of an already-loaded `Manifest` (SYNC, pure):
+/// `logicalBytes` = Σ file sizes (duplicates counted); `physicalBytes` = Σ
+/// size over unique content checksums (the deduplicated footprint). Mirrors
+/// `snapdir_api::manifest_size` (dedup-by-checksum over File entries).
+#[napi(js_name = "manifestSize")]
+pub fn manifest_size(m: Manifest) -> SizeStats {
+    let mut logical: u64 = 0;
+    let mut files: u64 = 0;
+    let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for e in &m.entries {
+        if matches!(e.path_type, PathType::File) {
+            let (_, sz, _) = e.size.get_u64();
+            logical = logical.saturating_add(sz);
+            files += 1;
+            seen.entry(e.checksum.clone()).or_insert(sz);
+        }
+    }
+    let physical = seen.values().copied().fold(0u64, u64::saturating_add);
+    let objects = seen.len() as u64;
+    SizeStats {
+        logical_bytes: BigInt::from(logical),
+        physical_bytes: BigInt::from(physical),
+        files: BigInt::from(files),
+        objects: BigInt::from(objects),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DiffEntry
 // ---------------------------------------------------------------------------
 

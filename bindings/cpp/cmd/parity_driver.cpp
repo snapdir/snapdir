@@ -22,6 +22,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -131,6 +132,11 @@ int main(int argc, char **argv) {
                 die("checkout requires <id> <store_uri> <dest>");
             }
             snapdir::pull(rest[0], rest[1], rest[2]).get();
+        } else if (sub == "size") {
+            std::string store = argv[2];
+            std::optional<std::string> id = (argc > 3) ? std::optional<std::string>(argv[3]) : std::nullopt;
+            snapdir::SizeStats s = snapdir::size(store, id).get();
+            std::cout << s.logical_bytes << "\n" << s.physical_bytes << "\n" << s.files << "\n" << s.objects << "\n";
         } else {
             die("unknown subcommand " + sub);
         }

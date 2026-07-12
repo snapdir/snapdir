@@ -9,6 +9,7 @@
 //!   app pull <id>  <store> <dest>       — materialises snapshot into dest
 //!   app id   <dir>                      — prints the 64-hex snapshot id
 //!   app diff <store@id_a> <store@id_b>  — prints STATUS<TAB>PATH per line
+//!   app size <store> [<snapshot_id>]    — prints "logical physical files objects"
 
 const std = @import("std");
 const snapdir = @import("snapdir");
@@ -31,7 +32,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
-        try stderr.writeAll("usage: app {push|pull|id|diff} [args...]\n");
+        try stderr.writeAll("usage: app {push|pull|id|diff|size} [args...]\n");
         std.process.exit(1);
     }
 
@@ -108,6 +109,15 @@ pub fn main() !void {
         for (entries) |e| {
             try stdout.print("{c}\t{s}\n", .{ @intFromEnum(e.status), e.path });
         }
+
+    } else if (std.mem.eql(u8, cmd, "size")) {
+        // size <store> [<snapshot_id>] — report store/snapshot byte-size accounting.
+        const store_z = try allocator.dupeZ(u8, args[2]);
+        defer allocator.free(store_z);
+        const id_z: ?[:0]const u8 = if (args.len > 3) try allocator.dupeZ(u8, args[3]) else null;
+        defer if (id_z) |id| allocator.free(@constCast(id));
+        const s = try snapdir.size(allocator, store_z, id_z);
+        try stdout.print("{d} {d} {d} {d}\n", .{ s.logical_bytes, s.physical_bytes, s.files, s.objects });
 
     } else {
         try stderr.print("unknown command: {s}\n", .{cmd});

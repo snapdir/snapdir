@@ -159,10 +159,10 @@ func main() {
 
 ## Install from the published module (GOPROXY)
 
-The module resolves from GOPROXY at the tag `bindings/go/v1.11.0`:
+The module resolves from GOPROXY at the tag `bindings/go/v1.12.0`:
 
 ```sh
-go get github.com/snapdir/snapdir/bindings/go@v1.11.0
+go get github.com/snapdir/snapdir/bindings/go@v1.12.0
 ```
 
 Because this is a CGo package, the module is **not self-contained** — you must

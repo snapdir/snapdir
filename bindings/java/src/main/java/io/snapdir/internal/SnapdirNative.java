@@ -5,6 +5,7 @@ import io.snapdir.HashMismatchException;
 import io.snapdir.InFluxException;
 import io.snapdir.NativeLoader;
 import io.snapdir.SnapdirException;
+import io.snapdir.SizeStats;
 import io.snapdir.StoreException;
 import jdk.incubator.foreign.CLinker;
 import jdk.incubator.foreign.FunctionDescriptor;
@@ -13,6 +14,7 @@ import jdk.incubator.foreign.MemoryAddress;
 import jdk.incubator.foreign.MemoryLayout;
 import jdk.incubator.foreign.MemorySegment;
 import jdk.incubator.foreign.ResourceScope;
+import jdk.incubator.foreign.SegmentAllocator;
 import jdk.incubator.foreign.SymbolLookup;
 
 import java.lang.invoke.MethodHandle;
@@ -245,6 +247,39 @@ public final class SnapdirNative {
                 CLinker.C_CHAR,
                 CLinker.C_POINTER,
                 CLinker.C_POINTER
+            )
+        );
+
+    // SnapdirSizeStats: { uint64 logical_bytes, physical_bytes, files, objects } returned BY VALUE.
+    // MUST be a GroupLayout (structLayout) -- a sequenceLayout does NOT trigger the AArch64 struct
+    // return-buffer path (needsReturnBuffer stays false). structLayout is the JDK-17 name for ofStruct.
+    private static final MemoryLayout SIZE_STATS_LAYOUT =
+        MemoryLayout.structLayout(
+            CLinker.C_LONG.withName("logical_bytes"),
+            CLinker.C_LONG.withName("physical_bytes"),
+            CLinker.C_LONG.withName("files"),
+            CLinker.C_LONG.withName("objects"));
+
+    // struct SnapdirSizeStats snapdir_size(const char* store_uri, const char* id,
+    //                                      SnapdirError** err_out)
+    // Struct-by-value return: the MethodType passed to downcallHandle must match the
+    // FunctionDescriptor arity (3 pointer args) with a MemorySegment return. The linker
+    // AUTO-PREPENDS the SegmentAllocator to the *returned* handle, so it must NOT appear
+    // here -- it is supplied only at invokeExact time.
+    private static final MethodHandle MH_SIZE =
+        LINKER.downcallHandle(
+            sym("snapdir_size"),
+            MethodType.methodType(
+                MemorySegment.class,
+                MemoryAddress.class,     // store_uri
+                MemoryAddress.class,     // id (nullable)
+                MemoryAddress.class      // err_out: SnapdirError**
+            ),
+            FunctionDescriptor.of(
+                SIZE_STATS_LAYOUT,
+                CLinker.C_POINTER,       // store_uri
+                CLinker.C_POINTER,       // id
+                CLinker.C_POINTER        // err_out
             )
         );
 
@@ -646,6 +681,46 @@ public final class SnapdirNative {
             throw e;
         } catch (Throwable t) {
             throw new SnapdirException("INTERNAL", "snapdir_diff_json failed: " + t.getMessage(), t);
+        }
+    }
+
+    /**
+     * Reports the size of a snapshot ({@code id} non-null) or the whole store
+     * ({@code id} null, deduplicated across every snapshot) at {@code storeUri}.
+     *
+     * @param storeUri store URI (required)
+     * @param id       64-hex snapshot id or {@code null} for the whole store
+     * @return size stats
+     * @throws SnapdirException on C ABI failure
+     */
+    public static SizeStats size(String storeUri, String id) throws SnapdirException {
+        try (ResourceScope scope = ResourceScope.newConfinedScope()) {
+            SegmentAllocator alloc = SegmentAllocator.ofScope(scope);
+
+            MemoryAddress storeAddr = toCString(storeUri, scope);
+            MemoryAddress idAddr    = toCStringOrNull(id, scope);
+
+            // err_out: SnapdirError** - one pointer-sized slot, initialised NULL.
+            MemorySegment errOut = MemorySegment.allocateNative(CLinker.C_POINTER, scope);
+            MemoryAccess.setAddress(errOut, MemoryAddress.NULL);
+
+            MemorySegment res = (MemorySegment) MH_SIZE.invokeExact(
+                alloc, storeAddr, idAddr, errOut.address());
+
+            MemoryAddress errPtr = MemoryAccess.getAddress(errOut);
+            if (!errPtr.equals(MemoryAddress.NULL)) {
+                throw takeError(errPtr);
+            }
+
+            long logical  = MemoryAccess.getLongAtOffset(res, 0);
+            long physical = MemoryAccess.getLongAtOffset(res, 8);
+            long files    = MemoryAccess.getLongAtOffset(res, 16);
+            long objects  = MemoryAccess.getLongAtOffset(res, 24);
+            return new SizeStats(logical, physical, files, objects);
+        } catch (SnapdirException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new SnapdirException("INTERNAL", "snapdir_size failed: " + t.getMessage(), t);
         }
     }
 

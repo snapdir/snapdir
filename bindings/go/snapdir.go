@@ -231,12 +231,12 @@ func Manifest(ctx context.Context, path string, opts *ManifestOptions) (*Manifes
 		raw := C.snapdir_manifest(
 			cPath,
 			cExclude,
-			0,                 // walk_jobs: 0 = auto
+			0, // walk_jobs: 0 = auto
 			C.bool(absolute),
 			C.bool(noFollow),
-			nil,               // checksum_bin: NULL = b3sum default
-			nil,               // cache_dir: NULL = default
-			nil,               // catalog: NULL = default
+			nil, // checksum_bin: NULL = b3sum default
+			nil, // cache_dir: NULL = default
+			nil, // catalog: NULL = default
 			&errPtr,
 		)
 		if raw == nil {
@@ -392,12 +392,12 @@ func Push(ctx context.Context, path, storeURI string) (string, error) {
 		var errPtr *C.SnapdirError
 		idRaw := C.snapdir_push_blocking(
 			cPath,
-			nil,    // source_id: NULL (using source_path)
+			nil, // source_id: NULL (using source_path)
 			cStore,
-			0,      // jobs: 0 = default
-			nil,    // limit_rate: NULL = unlimited
-			0,      // max_retries: 0 = default (5)
-			nil,    // cache_dir: NULL = default
+			0,   // jobs: 0 = default
+			nil, // limit_rate: NULL = unlimited
+			0,   // max_retries: 0 = default (5)
+			nil, // cache_dir: NULL = default
 			&errPtr,
 		)
 		if idRaw == nil {
@@ -495,6 +495,97 @@ func Fetch(ctx context.Context, snapshotID, storeURI string) error {
 		return res.err
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// SizeStats reports the byte-size and object-count for a snapshot or store.
+// Objects are stored uncompressed, so PhysicalBytes equals the on-disk
+// .objects/ byte total for a file:// store.
+type SizeStats struct {
+	// LogicalBytes is the sum of every file's size, duplicates counted.
+	LogicalBytes uint64
+	// PhysicalBytes is the sum of size over unique content checksums (deduplicated).
+	PhysicalBytes uint64
+	// Files is the number of file entries.
+	Files uint64
+	// Objects is the number of distinct content objects (unique checksums).
+	Objects uint64
+}
+
+// ManifestSize computes size statistics from a ManifestResult without calling
+// into the C layer. It is pure/synchronous and never returns an error.
+//
+// For each File entry, Size is added to LogicalBytes and Files is incremented.
+// Distinct non-empty Checksums contribute Size to PhysicalBytes and Objects
+// exactly once (dedup by checksum).
+func ManifestSize(m *ManifestResult) SizeStats {
+	var s SizeStats
+	seen := make(map[string]struct{})
+	for _, e := range m.Entries {
+		if e.PathType != PathTypeFile {
+			continue
+		}
+		s.LogicalBytes += e.Size
+		s.Files++
+		if e.Checksum != "" {
+			if _, ok := seen[e.Checksum]; !ok {
+				seen[e.Checksum] = struct{}{}
+				s.PhysicalBytes += e.Size
+				s.Objects++
+			}
+		}
+	}
+	return s
+}
+
+// Size reports the byte-size of a snapshot (id non-empty, 64-hex) or the whole
+// store (id == "" — deduplicated across every snapshot) at storeURI.
+//
+// An absent file:// store is treated as empty (no error, all-zero SizeStats).
+// An invalid or unknown-scheme URI returns INVALID_STORE from the C layer.
+// Cancellation via ctx is honoured.
+func Size(ctx context.Context, storeURI string, id string) (SizeStats, error) {
+	doInit()
+	if err := ctx.Err(); err != nil {
+		return SizeStats{}, err
+	}
+
+	type sizeResult struct {
+		stats SizeStats
+		err   error
+	}
+	ch := make(chan sizeResult, 1)
+
+	go func() {
+		cStore := C.CString(storeURI)
+		defer C.free(unsafe.Pointer(cStore))
+
+		var cID *C.char
+		if id != "" {
+			cID = C.CString(id)
+			defer C.free(unsafe.Pointer(cID))
+		}
+
+		var errPtr *C.SnapdirError
+		cs := C.snapdir_size(cStore, cID, &errPtr)
+		if errPtr != nil {
+			ch <- sizeResult{SizeStats{}, extractCError(errPtr)}
+			return
+		}
+		stats := SizeStats{
+			LogicalBytes:  uint64(cs.logical_bytes),
+			PhysicalBytes: uint64(cs.physical_bytes),
+			Files:         uint64(cs.files),
+			Objects:       uint64(cs.objects),
+		}
+		ch <- sizeResult{stats, nil}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.stats, res.err
+	case <-ctx.Done():
+		return SizeStats{}, ctx.Err()
 	}
 }
 
