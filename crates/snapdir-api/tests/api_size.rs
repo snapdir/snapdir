@@ -59,13 +59,17 @@ async fn store_size_matches_manifest_and_on_disk() {
 
     // A snapshot's size equals the local manifest's size.
     let m = snapdir_api::manifest(root.as_path(), &ManifestOptions::default()).unwrap();
-    let by_id = snapdir_api::size(&store, Some(&id)).await.expect("size --id");
+    let by_id = snapdir_api::size(&store, Some(&id))
+        .await
+        .expect("size --id");
     assert_eq!(by_id, snapdir_api::manifest_size(&m));
     assert_eq!(by_id.physical_bytes, 29);
     assert_eq!(by_id.logical_bytes, 41);
 
     // Whole-store (one snapshot) equals the single-snapshot figure.
-    let whole = snapdir_api::size(&store, None).await.expect("size whole store");
+    let whole = snapdir_api::size(&store, None)
+        .await
+        .expect("size whole store");
     assert_eq!(whole, by_id);
 
     // ACCEPTANCE: physical == on-disk object bytes (store is uncompressed).
