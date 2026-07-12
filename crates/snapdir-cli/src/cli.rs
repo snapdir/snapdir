@@ -4335,6 +4335,7 @@ mod tests {
     // counts every file's bytes; physical counts each unique object once (both
     // within a manifest and, for a whole-store call, across manifests).
     #[test]
+    #[allow(clippy::many_single_char_names)] // a/b/c/d… are checksum fixtures, clearer short
     fn manifest_size_stats_dedups_by_checksum() {
         let a = "a".repeat(64); // object A, size 10, appears twice
         let b = "b".repeat(64); // object B, size 7, appears once

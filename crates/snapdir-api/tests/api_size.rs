@@ -27,7 +27,7 @@ fn dir_bytes(dir: &Path) -> u64 {
             if p.is_dir() {
                 total += dir_bytes(&p);
             } else {
-                total += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                total += std::fs::metadata(&p).map_or(0, |m| m.len());
             }
         }
     }
