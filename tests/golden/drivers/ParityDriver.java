@@ -116,6 +116,16 @@ public final class ParityDriver {
                     // 1.5: pull(id, store, dest)  dest re-manifests to id
                     Snapdir.pull(rest[0], rest[1], rest[2], null).join();
                 }
+                case "size" -> {
+                    if (rest.length < 1) { die("size requires <store_uri>", 2); }
+                    String store = rest[0];
+                    String id = (rest.length > 1) ? rest[1] : null;
+                    io.snapdir.SizeStats s = Snapdir.size(store, id).get();
+                    out.println(Long.toUnsignedString(s.logicalBytes()));
+                    out.println(Long.toUnsignedString(s.physicalBytes()));
+                    out.println(Long.toUnsignedString(s.files()));
+                    out.println(Long.toUnsignedString(s.objects()));
+                }
                 default -> die("unknown subcommand '" + sub + "'", 2);
             }
             out.flush();

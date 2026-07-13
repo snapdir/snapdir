@@ -679,6 +679,25 @@ pub enum Command {
         cache_mgmt: CacheMgmtArgs,
     },
 
+    /// Report the logical and physical (deduplicated) byte size of a snapshot,
+    /// a whole store, or a local directory.
+    Size {
+        /// Store URI: `protocol://location/path`.
+        #[arg(long, value_name = "URI", env = "SNAPDIR_STORE")]
+        store: Option<String>,
+
+        /// Snapshot ID to size. Omit (with `--store`) to size the whole store.
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+
+        /// Emit machine-readable JSON instead of the human-readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// A local directory to size instead of a store (like `snapdir id <dir>`).
+        path: Option<PathBuf>,
+    },
+
     /// Verify the integrity of the local cache.
     VerifyCache {
         /// Cache-management flags (`--id`, `--purge`, `--cache-dir`, …).
@@ -983,6 +1002,12 @@ impl Cli {
             Command::Verify { cache_mgmt }
             | Command::VerifyCache { cache_mgmt }
             | Command::FlushCache { cache_mgmt } => merge_cache_mgmt(&mut globals, cache_mgmt),
+            // `size` folds its `--store`/`--id` so the stream resolver + the
+            // whole-store enumeration see them (json/path stay on the variant).
+            Command::Size { store, id, .. } => {
+                globals.store.clone_from(store);
+                globals.id.clone_from(id);
+            }
             Command::Locations { catalog }
             | Command::Ancestors { catalog }
             | Command::Revisions { catalog } => merge_catalog(&mut globals, catalog),
@@ -1209,6 +1234,7 @@ impl Ctx {
             Command::Checkout { dir, .. } => self.run_checkout(dir.as_deref()),
             Command::Pull { path, .. } => self.run_pull(path.as_deref()),
             Command::Verify { .. } => self.run_verify(),
+            Command::Size { json, path, .. } => self.run_size(*json, path.as_deref()),
             Command::Stage { dir, .. } => self.run_stage(dir.as_deref()),
             Command::VerifyCache { .. } => self.run_verify_cache(),
             Command::FlushCache { .. } => self.run_flush_cache(),
@@ -2013,6 +2039,49 @@ impl Ctx {
         store
             .fetch_files(&manifest, scratch.path())
             .with_context(|| format!("verifying objects for snapshot {id}"))?;
+        Ok(())
+    }
+
+    /// `snapdir size`: report logical + physical (deduplicated) byte sizes.
+    ///
+    /// Objects are stored uncompressed, so a File entry's manifest SIZE equals
+    /// its on-disk object bytes — the manifest alone yields both the logical size
+    /// (Σ file sizes, duplicates counted) and the physical footprint (Σ size over
+    /// UNIQUE content checksums) with no object listing. `<dir>` sizes a local
+    /// tree, `--id` one snapshot, and a bare `--store` the whole store
+    /// (deduplicated across every snapshot). Manifests-only: the object surface
+    /// is never touched.
+    fn run_size(&self, json: bool, path: Option<&Path>) -> Result<()> {
+        // Local-directory mode: compute the manifest in-process (like `id`).
+        if let Some(dir) = path {
+            let manifest =
+                self.build_manifest(Some(dir), false, false, None, &self.globals.exclude, None)?;
+            let stats = manifest_size_stats(std::slice::from_ref(&manifest));
+            print_size(&stats, None, json);
+            return Ok(());
+        }
+
+        // Store modes: `--id` pins one manifest; a bare `--store` unions all.
+        let store = self.resolve_stream_store()?;
+        let pinned = self.globals.id.as_deref();
+        let ids: Vec<String> = match pinned {
+            Some(id) => vec![id.to_owned()],
+            None => store
+                .list_manifest_ids()
+                .context("listing manifests in the store")?,
+        };
+        let mut manifests = Vec::with_capacity(ids.len());
+        for id in &ids {
+            manifests.push(
+                store
+                    .get_manifest(id)
+                    .with_context(|| format!("reading manifest {id}"))?,
+            );
+        }
+        let stats = manifest_size_stats(&manifests);
+        // Report the snapshot count only for a whole-store sweep.
+        let snapshots = pinned.is_none().then_some(ids.len());
+        print_size(&stats, snapshots, json);
         Ok(())
     }
 
@@ -3915,6 +3984,82 @@ fn total_object_bytes(manifest: &Manifest) -> u64 {
         .sum()
 }
 
+/// The size accounting a `snapdir size` run reports (BigQuery-style logical vs
+/// physical bytes).
+struct SizeStats {
+    /// Σ of every File entry's size, duplicates counted — the apparent content
+    /// size of the tree(s).
+    logical_bytes: u64,
+    /// Σ of size over UNIQUE content checksums — the deduplicated on-disk
+    /// footprint. Objects are stored uncompressed, so manifest SIZE == bytes.
+    physical_bytes: u64,
+    /// Number of File entries across the manifest(s).
+    files: u64,
+    /// Number of distinct content objects (unique checksums).
+    objects: u64,
+}
+
+/// Folds one or more manifests into a [`SizeStats`], deduplicating objects by
+/// content checksum across ALL supplied manifests — so a whole-store call unions
+/// every snapshot's objects. Directory entries carry merkle checksums, not object
+/// bytes, so only File entries contribute (matching [`total_object_bytes`]).
+fn manifest_size_stats(manifests: &[Manifest]) -> SizeStats {
+    let mut logical: u64 = 0;
+    let mut files: u64 = 0;
+    let mut seen: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for manifest in manifests {
+        for entry in manifest.entries() {
+            if entry.path_type == PathType::File {
+                logical = logical.saturating_add(entry.size);
+                files += 1;
+                seen.entry(entry.checksum.as_str()).or_insert(entry.size);
+            }
+        }
+    }
+    let physical = seen.values().copied().fold(0u64, u64::saturating_add);
+    SizeStats {
+        logical_bytes: logical,
+        physical_bytes: physical,
+        files,
+        objects: seen.len() as u64,
+    }
+}
+
+/// Prints a [`SizeStats`] as the human-readable summary, or one JSON object.
+/// `snapshots` is `Some` only for a whole-store sweep.
+fn print_size(stats: &SizeStats, snapshots: Option<usize>, json: bool) {
+    if json {
+        let prefix = match snapshots {
+            Some(n) => format!("\"snapshots\":{n},"),
+            None => String::new(),
+        };
+        println!(
+            "{{{prefix}\"files\":{},\"objects\":{},\"logical_bytes\":{},\"physical_bytes\":{}}}",
+            stats.files, stats.objects, stats.logical_bytes, stats.physical_bytes
+        );
+    } else {
+        if let Some(n) = snapshots {
+            println!("snapshots  {n}");
+        }
+        println!(
+            "logical    {}   ({} {})",
+            crate::progress::human_bytes(stats.logical_bytes),
+            stats.files,
+            if stats.files == 1 { "file" } else { "files" }
+        );
+        println!(
+            "physical   {}   ({} {}, deduplicated)",
+            crate::progress::human_bytes(stats.physical_bytes),
+            stats.objects,
+            if stats.objects == 1 {
+                "object"
+            } else {
+                "objects"
+            }
+        );
+    }
+}
+
 /// Restores each manifest entry's octal permissions onto the materialized tree
 /// at `dest`. The store's `fetch_files` reproduces the bytes and tree shape but
 /// not the modes, so the CLI applies them here — without this the checked-out
@@ -4185,6 +4330,40 @@ fn exclude_runtime_paths(cache_dir: Option<&Path>) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `manifest_size_stats` must dedup objects by content checksum: logical
+    // counts every file's bytes; physical counts each unique object once (both
+    // within a manifest and, for a whole-store call, across manifests).
+    #[test]
+    #[allow(clippy::many_single_char_names)] // a/b/c/d… are checksum fixtures, clearer short
+    fn manifest_size_stats_dedups_by_checksum() {
+        let a = "a".repeat(64); // object A, size 10, appears twice
+        let b = "b".repeat(64); // object B, size 7, appears once
+        let d = "d".repeat(64); // a directory entry (must not contribute)
+                                // Single manifest: two files share object A + one unique B + a dir.
+        let text =
+            format!("D 755 {d} 27 ./\nF 644 {a} 10 ./x\nF 644 {a} 10 ./y\nF 644 {b} 7 ./z\n");
+        let m = Manifest::parse(&text).expect("manifest parses");
+        let s = manifest_size_stats(std::slice::from_ref(&m));
+        assert_eq!(s.logical_bytes, 27, "10 + 10 + 7"); // dups counted
+        assert_eq!(s.physical_bytes, 17, "A(10) once + B(7)"); // deduped
+        assert_eq!(s.files, 3);
+        assert_eq!(s.objects, 2);
+
+        // Whole-store: a second manifest re-references A (dedup) + adds C.
+        let c = "c".repeat(64);
+        let text2 = format!("D 755 {d} 15 ./\nF 644 {a} 10 ./x\nF 644 {c} 5 ./w\n");
+        let m2 = Manifest::parse(&text2).expect("manifest parses");
+        let s2 = manifest_size_stats(&[m, m2]);
+        assert_eq!(s2.logical_bytes, 27 + 15, "all file sizes, dups counted");
+        assert_eq!(
+            s2.physical_bytes,
+            10 + 7 + 5,
+            "A, B, C each once across manifests"
+        );
+        assert_eq!(s2.files, 5);
+        assert_eq!(s2.objects, 3);
+    }
 
     // The scheme→store routing decision must match the shared stores router for
     // every supported scheme, WITHOUT touching the network or credentials. We

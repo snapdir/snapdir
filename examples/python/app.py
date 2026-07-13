@@ -10,6 +10,7 @@
 #   app.py pull <id>  <store> <dest>       → materialises snapshot into dest
 #   app.py id   <dir>                      → prints the 64-hex snapshot id
 #   app.py diff <store@id_a> <store@id_b>  → prints STATUS<TAB>PATH per line
+#   app.py size <store> [<snapshot_id>]    → prints "logical physical files objects"
 """snapdir Python binding — minimal relay CLI example."""
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def porcelain(entries: list[snapdir.DiffEntry]) -> str:
 
 async def main() -> None:
     if len(sys.argv) < 2:
-        print('usage: app.py {push|pull|id|diff} [args...]', file=sys.stderr)
+        print('usage: app.py {push|pull|id|diff|size} [args...]', file=sys.stderr)
         sys.exit(1)
 
     cmd, *args = sys.argv[1:]
@@ -79,6 +80,11 @@ async def main() -> None:
 
             entries = await snapdir.diff(DiffOptions.from_refs([fstore_from], [fstore_to]))
             sys.stdout.write(porcelain(entries))
+
+    elif cmd == 'size':
+        # size <store> [<snapshot_id>] — report store/snapshot byte-size accounting.
+        s = await snapdir.size(StoreUri(args[0]), SnapshotId(args[1]) if len(args) > 1 else None)
+        print(f'{s.logical_bytes} {s.physical_bytes} {s.files} {s.objects}')
 
     else:
         print(f'unknown command: {cmd}', file=sys.stderr)

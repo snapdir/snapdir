@@ -76,7 +76,7 @@ function buildManifestOptions(opts) {
 
 async function main() {
   const [, , sub, ...rest] = process.argv
-  if (!sub) die('usage: node_driver.mjs {manifest|id|push|fetch|checkout} <args...>', 2)
+  if (!sub) die('usage: node_driver.mjs {manifest|id|push|fetch|checkout|size} <args...>', 2)
 
   let binding
   try {
@@ -142,6 +142,13 @@ async function main() {
       const dest = rest[2]
       if (!id || !storeUri || !dest) die('checkout requires <id> <store_uri> <dest>', 2)
       await binding.pull(id, storeUri, dest)
+      break
+    }
+
+    case 'size': {
+      const [store, id] = rest
+      const s = await binding.size(store, id ?? undefined)
+      process.stdout.write(`${s.logicalBytes}\n${s.physicalBytes}\n${s.files}\n${s.objects}\n`)
       break
     }
 

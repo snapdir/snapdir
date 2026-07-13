@@ -153,6 +153,8 @@ module.exports = {
   sync: _wrapAsync(nativeBinding.sync.bind(nativeBinding)),
   diff: _wrapAsync(nativeBinding.diff.bind(nativeBinding)),
   verify: _wrapAsync(nativeBinding.verify.bind(nativeBinding)),
+  size: _wrapAsync(nativeBinding.size.bind(nativeBinding)),
+  manifestSize: nativeBinding.manifestSize.bind(nativeBinding),
 }
 `
 
@@ -182,6 +184,8 @@ export const checkout = _cjs.checkout
 export const sync = _cjs.sync
 export const diff = _cjs.diff
 export const verify = _cjs.verify
+export const size = _cjs.size
+export const manifestSize = _cjs.manifestSize
 `
 
 // ---------------------------------------------------------------------------

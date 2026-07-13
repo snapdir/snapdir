@@ -114,6 +114,31 @@ public final class Snapdir {
         return SnapdirNative.idFromManifestText(m.raw());
     }
 
+    /**
+     * Computes size statistics from a previously-parsed manifest.
+     *
+     * <p>This is a pure, synchronous, no-throw operation: it sums file sizes
+     * over the manifest entries, deduplicating by checksum to compute the
+     * physical footprint. Directory entries are excluded.
+     *
+     * @param m parsed manifest
+     * @return size stats
+     */
+    public static SizeStats manifestSize(Manifest m) {
+        long logical = 0, physical = 0, files = 0, objects = 0;
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        for (ManifestEntry e : m.entries()) {
+            if (e.type() != PathType.FILE) continue;
+            logical += e.size();
+            files++;
+            if (seen.add(e.checksum())) {
+                physical += e.size();
+                objects++;
+            }
+        }
+        return new SizeStats(logical, physical, files, objects);
+    }
+
     // -- Async operations --------------------------------------------------------
 
     /**
@@ -266,6 +291,28 @@ public final class Snapdir {
                     o.onConflict()
                 );
                 return parseDiffJson(json);
+            } catch (SnapdirException e) {
+                throw new java.util.concurrent.CompletionException(e);
+            }
+        });
+    }
+
+    /**
+     * Reports the size of a snapshot or the whole store.
+     *
+     * <p>When {@code id} is non-null, reports the size of that specific snapshot;
+     * when {@code id} is null, reports the deduplicated size across all snapshots
+     * in the store. The blocking C call runs on {@link ForkJoinPool#commonPool()}.
+     *
+     * @param storeUri store URI (e.g. {@code "file:///tmp/store"})
+     * @param id       64-hex snapshot id, or {@code null} for the whole store
+     * @return future resolving to {@link SizeStats}
+     */
+    public static CompletableFuture<SizeStats> size(String storeUri, String id) {
+        return CompletableFuture.supplyAsync(() -> {
+            SnapdirNative.init();
+            try {
+                return SnapdirNative.size(storeUri, id);
             } catch (SnapdirException e) {
                 throw new java.util.concurrent.CompletionException(e);
             }

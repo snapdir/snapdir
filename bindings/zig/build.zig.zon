@@ -1,7 +1,7 @@
 .{
     .name = "snapdir",
-    // binding-versioning policy (P43): bindings mirror snapdir-core (1.11.0).
-    .version = "1.11.0",
+    // binding-versioning policy (P43): bindings mirror snapdir-core (1.12.0).
+    .version = "1.12.0",
     .paths = .{
         "src",
         "build.zig",

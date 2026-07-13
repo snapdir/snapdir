@@ -129,6 +129,19 @@ func main() {
 			die("checkout failed: %v", err)
 		}
 
+	case "size":
+		store := os.Args[2]
+		var id string
+		if len(os.Args) > 3 {
+			id = os.Args[3]
+		}
+		st, err := snapdir.Size(ctx, store, id)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("%d\n%d\n%d\n%d\n", st.LogicalBytes, st.PhysicalBytes, st.Files, st.Objects)
+
 	default:
 		die("unknown subcommand %q", sub)
 	}

@@ -22,12 +22,14 @@ from .snapdir import (
     Manifest as Manifest,
     ManifestEntry as ManifestEntry,
     PathType as PathType,
+    SizeStats as SizeStats,
     # value types
     DiffOptions as DiffOptions,
     SnapshotId as SnapshotId,
     StoreUri as StoreUri,
     # sync functions
     id_from_manifest as id_from_manifest,
+    manifest_size as manifest_size,
     version as version,
 )
 
@@ -79,6 +81,8 @@ async def verify(
     store: StoreUri,
 ) -> bool: ...
 
+async def size(store: StoreUri, id: SnapshotId | None = None) -> SizeStats: ...
+
 __all__ = [
     # exceptions
     "SnapdirError",
@@ -91,6 +95,7 @@ __all__ = [
     "ManifestEntry",
     "Manifest",
     "DiffEntry",
+    "SizeStats",
     # value types
     "SnapshotId",
     "StoreUri",
@@ -98,6 +103,7 @@ __all__ = [
     # sync functions
     "version",
     "id_from_manifest",
+    "manifest_size",
     # async functions
     "manifest",
     "id",
@@ -109,4 +115,5 @@ __all__ = [
     "sync",
     "diff",
     "verify",
+    "size",
 ]

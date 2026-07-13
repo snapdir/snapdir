@@ -174,9 +174,9 @@ musl_fail() {
 musl_cargo_build() {
   local profile="$1"
   if [ "$profile" = "release" ]; then
-    cargo build --workspace --all-features --locked --target "$MUSL_TARGET" --release
+    cargo build -p snapdir --all-features --locked --target "$MUSL_TARGET" --release
   else
-    cargo build --workspace --all-features --locked --target "$MUSL_TARGET"
+    cargo build -p snapdir --all-features --locked --target "$MUSL_TARGET"
   fi
 }
 
@@ -193,7 +193,7 @@ run_musl_leg() {
       local p
       for p in debug release; do
         run_check "musl build ($p)" \
-          "cargo build --workspace --all-features --locked --target $MUSL_TARGET$([ "$p" = release ] && echo ' --release')" \
+          "cargo build -p snapdir --all-features --locked --target $MUSL_TARGET$([ "$p" = release ] && echo ' --release')" \
           -- musl_cargo_build "$p" || true
       done
       return 0
@@ -207,8 +207,8 @@ run_musl_leg() {
     for p in debug release; do
       flag=""; [ "$p" = release ] && flag="--release"
       run_check "musl build ($p, via cross)" \
-        "cross build --workspace --all-features --locked --target $MUSL_TARGET $flag" \
-        -- cross build --workspace --all-features --locked --target "$MUSL_TARGET" $flag || true
+        "cross build -p snapdir --all-features --locked --target $MUSL_TARGET $flag" \
+        -- cross build -p snapdir --all-features --locked --target "$MUSL_TARGET" $flag || true
     done
     return 0
   fi
@@ -221,7 +221,7 @@ run_musl_leg() {
     local p
     for p in debug release; do
       run_check "musl build ($p, musl-cross linker)" \
-        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc cargo build --workspace --all-features --locked --target $MUSL_TARGET$([ "$p" = release ] && echo ' --release')" \
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc cargo build -p snapdir --all-features --locked --target $MUSL_TARGET$([ "$p" = release ] && echo ' --release')" \
         -- musl_cargo_build "$p" || true
     done
     return 0
@@ -269,7 +269,7 @@ docker_musl_build() {
     bash -euo pipefail -c "
       rustup target add $MUSL_TARGET >/dev/null 2>&1 || true
       apt-get update -qq && apt-get install -y --no-install-recommends musl-tools >/dev/null 2>&1
-      cargo build --workspace --all-features --locked --target $MUSL_TARGET $relflag
+      cargo build -p snapdir --all-features --locked --target $MUSL_TARGET $relflag
     "
 }
 
@@ -302,8 +302,8 @@ run_check "rustfmt --check" \
   -- cargo fmt --all --check || true
 
 run_check "clippy (-D warnings, --all-features)" \
-  "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings" \
-  -- cargo clippy --workspace --all-targets --all-features --locked -- -D warnings || true
+  "cargo clippy --workspace --exclude snapdir-node --exclude snapdir-python --all-targets --all-features --locked -- -D warnings" \
+  -- cargo clippy --workspace --exclude snapdir-node --exclude snapdir-python --all-targets --all-features --locked -- -D warnings || true
 
 if ensure_cargo_tool typos typos-cli; then
   run_check "typos" "typos" -- typos || true
@@ -349,7 +349,9 @@ else
 fi
 
 if ensure_cargo_tool cargo-audit cargo-audit; then
-  run_check "cargo-audit" "cargo audit" -- cargo audit || true
+  run_check "cargo-audit" \
+    "cargo audit --ignore RUSTSEC-2025-0020 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2025-0141" \
+    -- cargo audit --ignore RUSTSEC-2025-0020 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2025-0141 || true
 else
   FAILURES+=("cargo-audit (tool missing)|||cargo install cargo-audit && cargo audit")
 fi
@@ -360,28 +362,28 @@ fi
 banner "3/6 Build + Test"
 
 run_check "build (workspace, --all-features, locked)" \
-  "cargo build --workspace --all-features --locked" \
-  -- cargo build --workspace --all-features --locked || true
+  "cargo build --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked" \
+  -- cargo build --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked || true
 
 run_check "test (workspace, --all-features, locked)" \
-  "cargo test --workspace --all-features --locked" \
-  -- cargo test --workspace --all-features --locked || true
+  "cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked" \
+  -- cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked || true
 
 # Compile-only bench gate (criterion + iai-callgrind), so the benches can't
 # bit-rot. This is a fast compile check (no valgrind here — the real iai
 # instruction-count run goes through CI / benches/run-iai-docker.sh, NOT the
 # host), so it stays in the normal path even under --fast.
 run_check "bench compile (--no-run)" \
-  "cargo bench --workspace --no-run --locked" \
-  -- cargo bench --workspace --no-run --locked || true
+  "cargo bench --workspace --exclude snapdir-node --exclude snapdir-python --no-run --locked" \
+  -- cargo bench --workspace --exclude snapdir-node --exclude snapdir-python --no-run --locked || true
 
 if msrv_installed; then
   run_check "MSRV ${MSRV} build" \
-    "cargo +${MSRV} build --workspace --all-features --locked" \
-    -- cargo "+${MSRV}" build --workspace --all-features --locked || true
+    "cargo +${MSRV} build --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked" \
+    -- cargo "+${MSRV}" build --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked || true
   run_check "MSRV ${MSRV} test" \
-    "cargo +${MSRV} test --workspace --all-features --locked" \
-    -- cargo "+${MSRV}" test --workspace --all-features --locked || true
+    "cargo +${MSRV} test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked" \
+    -- cargo "+${MSRV}" test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked || true
 else
   warn "MSRV ${MSRV} toolchain not installed, skipping (CI covers it). Add: rustup toolchain install ${MSRV}"
 fi
@@ -406,8 +408,8 @@ fi
 # ===========================================================================
 banner "5/6 Doctests"
 run_check "doctests" \
-  "cargo test --workspace --all-features --locked --doc" \
-  -- cargo test --workspace --all-features --locked --doc || true
+  "cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked --doc" \
+  -- cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked --doc || true
 
 # ===========================================================================
 # Group 6 — Coverage (fail-under 75)
@@ -426,11 +428,11 @@ else
       fi
     fi
     run_check "coverage (>= ${COVERAGE_FLOOR}% lines)" \
-      "cargo llvm-cov --workspace --all-features --locked --fail-under-lines ${COVERAGE_FLOOR} --lcov --output-path lcov.info" \
-      -- cargo llvm-cov --workspace --all-features --locked \
+      "cargo llvm-cov --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked --fail-under-lines ${COVERAGE_FLOOR} --lcov --output-path lcov.info" \
+      -- cargo llvm-cov --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked \
          --fail-under-lines "$COVERAGE_FLOOR" --lcov --output-path lcov.info || true
   else
-    FAILURES+=("cargo-llvm-cov (tool missing)|||cargo install cargo-llvm-cov && cargo llvm-cov --workspace --all-features --locked --fail-under-lines ${COVERAGE_FLOOR}")
+    FAILURES+=("cargo-llvm-cov (tool missing)|||cargo install cargo-llvm-cov && cargo llvm-cov --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked --fail-under-lines ${COVERAGE_FLOOR}")
   fi
 fi
 

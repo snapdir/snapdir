@@ -9,6 +9,7 @@
 //   app pull <id>  <store> <dest>       → materialises snapshot into dest
 //   app id   <dir>                      → prints the 64-hex snapshot id
 //   app diff <store@id_a> <store@id_b>  → prints STATUS<TAB>PATH per line
+//   app size <store> [<snapshot_id>]    → prints "logical physical files objects"
 package main
 
 import (
@@ -33,7 +34,7 @@ func parseRef(ref string) (store, id string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: app {push|pull|id|diff} [args...]")
+		fmt.Fprintln(os.Stderr, "usage: app {push|pull|id|diff|size} [args...]")
 		os.Exit(1)
 	}
 
@@ -113,6 +114,20 @@ func main() {
 		for _, e := range entries {
 			fmt.Printf("%c\t%s\n", byte(e.Status), e.Path)
 		}
+
+	case "size":
+		// size <store> [<snapshot_id>] — report store/snapshot byte-size accounting.
+		store := args[0]
+		id := ""
+		if len(args) > 1 {
+			id = args[1]
+		}
+		st, err := snapdir.Size(ctx, store, id)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "size:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%d %d %d %d\n", st.LogicalBytes, st.PhysicalBytes, st.Files, st.Objects)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)

@@ -766,6 +766,105 @@ fn verify<'py>(
 }
 
 // ---------------------------------------------------------------------------
+// SizeStats + size() + manifest_size()
+// ---------------------------------------------------------------------------
+
+/// Byte-size accounting for a snapshot or store (BigQuery nomenclature).
+///
+/// All fields are arbitrary-precision Python `int` (mapped from Rust `u64`).
+/// Objects are stored uncompressed, so `physical_bytes` equals the on-disk
+/// `.objects/` byte total.
+#[pyclass(frozen, get_all)]
+pub struct SizeStats {
+    /// Apparent content size — sum of every file's size (duplicates counted).
+    pub logical_bytes: u64,
+    /// Deduplicated on-disk footprint — sum of size over unique checksums.
+    pub physical_bytes: u64,
+    /// Number of file entries.
+    pub files: u64,
+    /// Number of distinct content objects (unique checksums).
+    pub objects: u64,
+}
+
+#[pymethods]
+impl SizeStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "SizeStats(logical_bytes={}, physical_bytes={}, files={}, objects={})",
+            self.logical_bytes, self.physical_bytes, self.files, self.objects
+        )
+    }
+}
+
+impl From<snapdir_api::SizeStats> for SizeStats {
+    fn from(s: snapdir_api::SizeStats) -> Self {
+        SizeStats {
+            logical_bytes: s.logical_bytes,
+            physical_bytes: s.physical_bytes,
+            files: s.files,
+            objects: s.objects,
+        }
+    }
+}
+
+/// Reports the byte-size of a snapshot (`id` given) or the whole store
+/// (`id=None`). ASYNC coroutine.
+///
+/// Raises `SnapdirError` (a `StoreError`) on a bad store: a missing-root
+/// `file://` store yields code `"STORE_ERROR"` (not empty); an existing store
+/// with no manifests resolves to zeros.
+#[pyfunction]
+#[pyo3(signature = (store, id=None))]
+fn size<'py>(
+    py: Python<'py>,
+    store: PyRef<'_, StoreUri>,
+    id: Option<PyRef<'_, SnapshotId>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let store_raw = store.raw.clone();
+    let id_hex: Option<String> = id.map(|s| s.hex.clone());
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let result: snapdir_api::Result<snapdir_api::SizeStats> = async {
+            let store = snapdir_api::StoreUri::parse(&store_raw)?;
+            let sid = match &id_hex {
+                Some(h) => Some(snapdir_api::SnapshotId::from_hex(h)?),
+                None => None,
+            };
+            snapdir_api::size(&store, sid.as_ref()).await
+        }
+        .await;
+        Python::with_gil(|py| {
+            let stats = api_result(py, result)?;
+            Ok(into_py_obj(Bound::new(py, SizeStats::from(stats))?))
+        })
+    })
+}
+
+/// Computes the [`SizeStats`] of an already-loaded `Manifest` (SYNC, pure):
+/// `logical_bytes` = sum of file sizes (duplicates counted); `physical_bytes`
+/// = sum of size over unique content checksums. Mirrors
+/// `snapdir_api::manifest_size` (dedup-by-checksum over File entries).
+#[pyfunction]
+fn manifest_size(m: PyRef<'_, Manifest>) -> SizeStats {
+    let mut logical: u64 = 0;
+    let mut files: u64 = 0;
+    let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for e in &m.entries {
+        if e.path_type.name == "File" {
+            logical = logical.saturating_add(e.size);
+            files += 1;
+            seen.entry(e.checksum.clone()).or_insert(e.size);
+        }
+    }
+    let physical = seen.values().copied().fold(0u64, u64::saturating_add);
+    SizeStats {
+        logical_bytes: logical,
+        physical_bytes: physical,
+        files,
+        objects: seen.len() as u64,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module entry point
 // ---------------------------------------------------------------------------
 
@@ -784,6 +883,7 @@ fn snapdir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ManifestEntry>()?;
     m.add_class::<Manifest>()?;
     m.add_class::<DiffEntry>()?;
+    m.add_class::<SizeStats>()?;
 
     // Value types
     m.add_class::<SnapshotId>()?;
@@ -793,6 +893,7 @@ fn snapdir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Sync functions
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(id_from_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_size, m)?)?;
 
     // Async functions
     m.add_function(wrap_pyfunction!(manifest, m)?)?;
@@ -805,6 +906,7 @@ fn snapdir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sync, m)?)?;
     m.add_function(wrap_pyfunction!(diff, m)?)?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
+    m.add_function(wrap_pyfunction!(size, m)?)?;
 
     Ok(())
 }

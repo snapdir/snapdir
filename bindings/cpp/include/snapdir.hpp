@@ -23,6 +23,7 @@ extern "C" {
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace snapdir {
@@ -778,6 +779,82 @@ inline std::future<std::vector<DiffEntry>> diff(const std::string &from_uri,
         ));
         eg.throw_if_set();
         return detail::parse_diff_json(sg.str());
+    });
+}
+
+// ─── Size ────────────────────────────────────────────────────────────────────
+
+/// @brief Byte-size accounting for a snapshot or store.
+///
+/// Mirrors the C ABI SnapdirSizeStats — field names and order are identical.
+///   logical_bytes  — Σ size of ALL file entries, duplicates counted.
+///   physical_bytes — Σ size over UNIQUE content checksums (deduped footprint).
+///   files          — count of file entries.
+///   objects        — count of distinct content objects (unique checksums).
+///
+/// Objects are stored uncompressed, so physical_bytes equals the on-disk
+/// byte total of a file:// store's .objects/ directory.
+struct SizeStats {
+    std::uint64_t logical_bytes;   ///< Apparent content size (duplicates counted).
+    std::uint64_t physical_bytes;  ///< Deduplicated on-disk footprint.
+    std::uint64_t files;           ///< Number of file entries.
+    std::uint64_t objects;         ///< Number of distinct content checksums.
+};
+
+/// @brief Compute size statistics from a Manifest without any store I/O.
+///
+/// Pure C++ — no FFI call. Iterates m.entries: for every File entry, adds
+/// entry.size to logical_bytes and increments files. Tracks distinct non-empty
+/// checksums in an unordered_set; the first time a checksum is seen its size
+/// is added to physical_bytes and objects is incremented.  Mirrors the Rust
+/// snapdir_api dedup-by-checksum semantics.
+///
+/// @param m  A Manifest previously returned by manifest().
+/// @return   SizeStats with dedup-by-checksum accounting; all zeros for an
+///           empty or directory-only manifest.
+inline SizeStats manifest_size(const Manifest &m) {
+    SizeStats s{0, 0, 0, 0};
+    std::unordered_set<std::string> seen;
+    for (const auto &e : m.entries) {
+        if (e.type != PathType::File) continue;
+        s.logical_bytes += e.size;
+        ++s.files;
+        if (!e.checksum.empty() && seen.insert(e.checksum).second) {
+            s.physical_bytes += e.size;
+            ++s.objects;
+        }
+    }
+    return s;
+}
+
+/// @brief Report the byte-size of a snapshot or the whole store at @p store_uri.
+///
+/// When @p id is set, reports the size of that specific snapshot.
+/// When @p id is std::nullopt, reports the whole-store size deduplicated across
+/// every snapshot in the store.
+///
+/// The operation runs asynchronously in a background thread; call .get() to block.
+///
+/// @param store_uri  Store URI (e.g. "file:///mnt/store").
+/// @param id         64-hex snapshot id, or std::nullopt for the whole store.
+/// @return           A future resolving to a SizeStats struct.
+/// @throws snapdir::Error (from the future) on store I/O or invalid-store error.
+inline std::future<SizeStats> size(const std::string &store_uri,
+                                   std::optional<std::string> id)
+{
+    std::string store_s  = store_uri;
+    std::optional<std::string> id_copy = std::move(id);
+
+    return std::async(std::launch::async, [store_s, id_copy]() -> SizeStats {
+        detail::init();
+        ErrorGuard eg;
+        SnapdirSizeStats c = snapdir_size(
+            store_s.c_str(),
+            id_copy.has_value() ? id_copy->c_str() : nullptr,
+            eg.out_param()
+        );
+        eg.throw_if_set();
+        return SizeStats{c.logical_bytes, c.physical_bytes, c.files, c.objects};
     });
 }
 

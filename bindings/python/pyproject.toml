@@ -5,8 +5,8 @@ build-backend = "maturin"
 [project]
 name = "snapdir"
 # Versioning policy (binding-versioning gate, Phase 43): bindings mirror the
-# snapdir-core they wrap. Core/CLI is 1.11.0, so this binding is 1.11.0.
-version = "1.11.0"
+# snapdir-core they wrap. Core/CLI is 1.12.0, so this binding is 1.12.0.
+version = "1.12.0"
 requires-python = ">=3.10"
 description = "Python binding for snapdir — content-addressable directory snapshots."
 license = { text = "MIT" }

@@ -115,6 +115,17 @@ def main() -> None:
             snapdir.pull(snapdir.SnapshotId(sid), snapdir.StoreUri(store_uri), dest)
         )
 
+    elif sub == "size":
+        store = snapdir.StoreUri(sys.argv[2])
+        sid = snapdir.SnapshotId(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+        # snapdir.size is a raw PyO3 async fn that requires a running event loop
+        # at *call* time (not wrapped by the _lazy_async helper in __init__).
+        # Call it inside a coroutine so the loop is running when size() is invoked.
+        async def _do_size():
+            return await snapdir.size(store, sid)
+        s = asyncio.run(_do_size())
+        sys.stdout.write(f"{s.logical_bytes}\n{s.physical_bytes}\n{s.files}\n{s.objects}\n")
+
     else:
         die(f"unknown subcommand '{sub}'", 2)
 

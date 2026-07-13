@@ -9,6 +9,7 @@
 //   App pull <id>  <store> <dest>       → materialises snapshot into dest
 //   App id   <dir>                      → prints the 64-hex snapshot id
 //   App diff <store@id_a> <store@id_b>  → prints STATUS<TAB>PATH per line
+//   App size <store> [<snapshot_id>]    → prints "logical physical files objects"
 //
 // Compile: javac --release 17 --add-modules jdk.incubator.foreign -cp snapdir.jar App.java
 // Run:     java  --add-modules jdk.incubator.foreign
@@ -16,6 +17,7 @@
 
 import io.snapdir.DiffEntry;
 import io.snapdir.DiffStatus;
+import io.snapdir.SizeStats;
 import io.snapdir.Snapdir;
 
 import java.io.File;
@@ -57,7 +59,7 @@ public class App {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
-            System.err.println("usage: App {push|pull|id|diff} [args...]");
+            System.err.println("usage: App {push|pull|id|diff|size} [args...]");
             System.exit(1);
         }
 
@@ -112,6 +114,11 @@ public class App {
             } finally {
                 deleteTree(tmp);
             }
+
+        } else if ("size".equals(cmd)) {
+            // size <store> [<snapshot_id>] — report store/snapshot byte-size accounting.
+            SizeStats s = Snapdir.size(args[1], args.length > 2 ? args[2] : null).get();
+            System.out.println(s.logicalBytes() + " " + s.physicalBytes() + " " + s.files() + " " + s.objects());
 
         } else {
             System.err.println("unknown command: " + cmd);

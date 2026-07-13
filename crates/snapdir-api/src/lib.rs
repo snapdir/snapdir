@@ -560,6 +560,48 @@ impl Manifest {
     }
 }
 
+/// The byte size of a snapshot or store, BigQuery-style (logical vs physical).
+///
+/// Because objects are stored uncompressed and content-addressed, a file's
+/// manifest size equals its on-disk object bytes — so both figures come from the
+/// manifest(s) alone, with no object listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SizeStats {
+    /// Σ of every file entry's size, duplicates counted — apparent content size.
+    pub logical_bytes: u64,
+    /// Σ of size over UNIQUE content checksums — the deduplicated on-disk footprint.
+    pub physical_bytes: u64,
+    /// Number of file entries across the manifest(s).
+    pub files: u64,
+    /// Number of distinct content objects (unique checksums).
+    pub objects: u64,
+}
+
+/// Folds manifests into a [`SizeStats`], deduplicating objects by content
+/// checksum across ALL supplied manifests (so a whole-store call unions every
+/// snapshot). Directory entries carry merkle checksums, not object bytes, so
+/// only file entries contribute.
+fn manifests_size(manifests: &[Manifest]) -> SizeStats {
+    let mut logical: u64 = 0;
+    let mut files: u64 = 0;
+    let mut seen: std::collections::HashMap<[u8; 32], u64> = std::collections::HashMap::new();
+    for m in manifests {
+        for e in &m.entries {
+            if e.path_type == PathType::File {
+                logical = logical.saturating_add(e.size);
+                files += 1;
+                seen.entry(e.checksum).or_insert(e.size);
+            }
+        }
+    }
+    SizeStats {
+        logical_bytes: logical,
+        physical_bytes: seen.values().copied().fold(0u64, u64::saturating_add),
+        files,
+        objects: seen.len() as u64,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Options enums
 // ---------------------------------------------------------------------------
@@ -1043,6 +1085,14 @@ pub fn id_from_manifest(m: &Manifest) -> SnapshotId {
     let core = CoreManifest::parse(&m.raw).expect("raw manifest text must be valid");
     let hex = snapshot_id(&core, &hasher);
     SnapshotId::from_hex(&hex).expect("snapshot_id always returns a valid 64-hex string")
+}
+
+/// Computes the [`SizeStats`] of a single already-loaded manifest (sync, pure):
+/// `logical_bytes` = Σ file sizes (duplicates counted); `physical_bytes` = Σ size
+/// over unique content checksums (the deduplicated on-disk footprint).
+#[must_use]
+pub fn manifest_size(m: &Manifest) -> SizeStats {
+    manifests_size(std::slice::from_ref(m))
 }
 
 /// Stages `path` in the local cache and returns the snapshot id.
@@ -1552,9 +1602,42 @@ pub async fn diff(o: &DiffOptions) -> Result<Vec<DiffEntry>> {
     .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
 }
 
+/// Reports the [`SizeStats`] of a snapshot (`id = Some`) or the whole store
+/// (`id = None`, deduplicated across every snapshot), reading manifests only —
+/// the object surface is never touched.
+///
+/// # Errors
+///
+/// Returns `Err(SnapdirError)` if the store cannot be opened, a manifest cannot
+/// be listed/read, or `id` is absent from the store.
+pub async fn size(store: &StoreUri, id: Option<&SnapshotId>) -> Result<SizeStats> {
+    let store_str = store.raw.clone();
+    let id_hex = id.map(SnapshotId::to_hex);
+
+    tokio::task::spawn_blocking(move || size_sync(&store_str, id_hex.as_deref()))
+        .await
+        .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Manifests-only store size: `Some(id)` pins one snapshot, `None` unions the
+/// whole store. Only `list_manifest_ids` + `get_manifest` are called.
+fn size_sync(store_str: &str, id: Option<&str>) -> Result<SizeStats> {
+    let fs = open_stream_store(store_str)?;
+    let ids: Vec<String> = match id {
+        Some(hex) => vec![hex.to_owned()],
+        None => fs.list_manifest_ids().map_err(SnapdirError::from)?,
+    };
+    let mut manifests = Vec::with_capacity(ids.len());
+    for hex in &ids {
+        let core = fs.get_manifest(hex).map_err(SnapdirError::from)?;
+        manifests.push(Manifest::from_core(&core));
+    }
+    Ok(manifests_size(&manifests))
+}
 
 fn fetch_sync(hex_id: &str, store_str: &str) -> Result<()> {
     use snapdir_stores::file_store::FileStore;

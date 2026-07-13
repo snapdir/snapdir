@@ -10,6 +10,7 @@
 //   app pull <id>  <store> <dest>       → materialises snapshot into dest
 //   app id   <dir>                      → prints the 64-hex snapshot id
 //   app diff <store@id_a> <store@id_b>  → prints STATUS<TAB>PATH per line
+//   app size <store> [<snapshot_id>]    → prints "logical physical files objects"
 
 import * as snapdir from '@snapdir/snapdir'
 import { mkdirSync, rmSync } from 'node:fs'
@@ -84,7 +85,14 @@ switch (cmd) {
     break
   }
 
+  case 'size': {
+    // size <store> [<snapshot_id>] — report store/snapshot byte-size accounting.
+    const s = await snapdir.size(args[0], args[1])
+    console.log(`${s.logicalBytes} ${s.physicalBytes} ${s.files} ${s.objects}`)
+    break
+  }
+
   default:
-    process.stderr.write(`usage: app {push|pull|id|diff} [args...]\n`)
+    process.stderr.write(`usage: app {push|pull|id|diff|size} [args...]\n`)
     process.exit(1)
 }

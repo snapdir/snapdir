@@ -1079,9 +1079,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3669,14 +3669,14 @@ dependencies = [
 
 [[package]]
 name = "snapdir"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "snapdir-cli",
 ]
 
 [[package]]
 name = "snapdir-api"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "assert_cmd",
  "snapdir-catalog",
@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-benches"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "criterion",
  "iai-callgrind",
@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-catalog"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "redb",
  "serde",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-cli"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3728,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-core"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "blake3",
  "libc",
@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-ffi"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "cbindgen",
  "libc",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-ssh-store"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "snapdir-core",
  "snapdir-stores",
@@ -3782,7 +3782,7 @@ dependencies = [
 
 [[package]]
 name = "snapdir-stores"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",

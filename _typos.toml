@@ -54,6 +54,9 @@ disabl = "disabl"
 Iinclude = "Iinclude"
 # `clonable` is a valid adjective; intentional in the diff_status_is_eq_and_clonable test name.
 clonable = "clonable"
+# `breal` = a local var in the zig size test (`b` seed + `realpath`) holding seedB's real path;
+# a deliberate identifier, not "break".
+breal = "breal"
 
 [default.extend-identifiers]
 # crate / API identifiers that look like typos but are intentional.
