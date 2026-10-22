@@ -435,7 +435,7 @@ mod tests {
         let report = verify_cache(tmp.path(), false, &Blake3Hasher).unwrap();
         assert_eq!(report.checked, 2, "two objects scanned");
         assert!(report.is_clean(), "no corruption: {report:?}");
-        assert!(report.purged.is_empty());
+        assert_eq!(report.purged, [] as [String; 0]);
     }
 
     #[test]

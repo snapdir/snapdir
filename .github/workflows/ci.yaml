@@ -164,6 +164,8 @@ jobs:
       - name: Test (workspace, locked)
         run: cargo test --workspace --exclude snapdir-node --exclude snapdir-python --all-features --locked
         env:
+          # Cross-crate API oracle tests need the workspace binary built above.
+          CARGO_BIN_EXE_snapdir: ${{ github.workspace }}/target/debug/snapdir
           # Forbid the loopback sshd suite's environmental eprintln-skip so the
           # T2 gate can't rot into all-skips on CI (sshd is guaranteed above).
           SNAPDIR_SSH_TEST_REQUIRE: "1"
