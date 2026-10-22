@@ -6,6 +6,7 @@ use snapdir_api::{
     CheckoutOptions, ManifestOptions, PathType, SnapshotId, StageOptions, StoreUri, TransferOptions,
 };
 use std::fmt::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 // Every case runs in a fresh process: environment mutation in a multithreaded
@@ -15,7 +16,38 @@ fn isolated(name: &str) -> bool {
         return false;
     }
     let temp = tempfile::tempdir().unwrap();
+    // A hermetic external adapter exercises the pre-existing direct-pull path.
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let mock =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../snapdir-stores/tests/snapdir-mock-store");
+    let adapter = bin.join("snapdir-ssh-store");
+    let script = std::fs::read_to_string(mock)
+        .unwrap()
+        .replace("mock://", "ssh://");
+    let (prefix, fetch) = script.split_once("\nget-fetch-files-command)\n").unwrap();
+    // The stores-level fixture populates an object cache. For this API dispatch
+    // regression, the mock fulfills Store::fetch_files by materializing paths.
+    // Shipped emit-command adapters' object-cache-only behavior is a separate,
+    // pre-existing API limitation (not changed by this transfer-options fix).
+    let fetch = fetch
+        .replace(
+            r#"${cache_dir}/$(dirname "${rel}")"#,
+            r#"${cache_dir}/$(dirname "${_path}")"#,
+        )
+        .replace("${cache_dir}/${rel}", "${cache_dir}/${_path}");
+    std::fs::write(
+        &adapter,
+        format!("{prefix}\nget-fetch-files-command)\n{fetch}"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
     let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("PATH", std::env::join_paths(paths).unwrap())
         .args(["--exact", name, "--nocapture", "--test-threads=1"])
         .env("SNAPDIR_TRANSFER_TEST_CHILD", name)
         .env("HOME", temp.path().join("home"))
@@ -415,5 +447,151 @@ fn default_options_preserve_colocated_pull_and_checkout() {
         std::fs::remove_dir_all(&f.store).unwrap();
         snapdir_api::checkout(&f.id, &dest, &opts).await.unwrap();
         f.assert_tree(&dest);
+    });
+}
+
+// SPEC: a complete warm cache does not override the requested manifest location.
+#[test]
+fn warm_cache_refuses_missing_or_corrupt_source_manifest() {
+    if isolated("warm_cache_refuses_missing_or_corrupt_source_manifest") {
+        return;
+    }
+    run(async {
+        for corrupt in [false, true] {
+            let f = Fixture::new(true);
+            let opts = options(&f.cache, Some(&f.pool));
+            snapdir_api::pull(&f.id, &uri(&f.store), &f.dest, &opts)
+                .await
+                .unwrap();
+            let manifest = shard(&f.store, ".manifests", &f.id.to_hex());
+            if corrupt {
+                std::fs::write(manifest, b"not a valid manifest\n").unwrap();
+            } else {
+                std::fs::remove_file(manifest).unwrap();
+            }
+            let dest = f.dest.with_file_name("must remain absent");
+            assert!(snapdir_api::pull(&f.id, &uri(&f.store), &dest, &opts)
+                .await
+                .is_err());
+            assert!(!dest.exists());
+        }
+    });
+}
+
+// SPEC: a cached manifest cannot certify corrupt or absent cached objects on repeat pull.
+#[test]
+fn warm_cache_refuses_corrupt_or_missing_object_before_writing_destination() {
+    if isolated("warm_cache_refuses_corrupt_or_missing_object_before_writing_destination") {
+        return;
+    }
+    run(async {
+        for corrupt in [false, true] {
+            let f = Fixture::new(true);
+            let opts = options(&f.cache, Some(&f.pool));
+            snapdir_api::pull(&f.id, &uri(&f.store), &f.dest, &opts)
+                .await
+                .unwrap();
+            let object = shard(&f.cache, ".objects", &f.object_hex);
+            if corrupt {
+                std::fs::write(object, b"corrupt").unwrap();
+            } else {
+                std::fs::remove_file(object).unwrap();
+            }
+            let dest = f.dest.with_file_name("preserved destination");
+            std::fs::create_dir(&dest).unwrap();
+            std::fs::write(dest.join("sentinel"), b"untouched").unwrap();
+            assert!(snapdir_api::pull(&f.id, &uri(&f.store), &dest, &opts)
+                .await
+                .is_err());
+            assert_eq!(std::fs::read(dest.join("sentinel")).unwrap(), b"untouched");
+            assert_eq!(std::fs::read_dir(dest).unwrap().count(), 1);
+        }
+    });
+}
+
+// SPEC: corrupt explicit cache manifests cannot be used or substituted by default cache data.
+#[test]
+fn checkout_refuses_corrupt_cache_manifest_before_writing_destination() {
+    if isolated("checkout_refuses_corrupt_cache_manifest_before_writing_destination") {
+        return;
+    }
+    run(async {
+        let f = Fixture::new(false);
+        snapdir_api::stage(&f.source, &StageOptions::default()).unwrap();
+        std::fs::write(
+            shard(&f.store, ".manifests", &f.id.to_hex()),
+            b"corrupt manifest\n",
+        )
+        .unwrap();
+        assert!(
+            snapdir_api::checkout(&f.id, &f.dest, &options(&f.store, None))
+                .await
+                .is_err()
+        );
+        assert!(!f.dest.exists());
+    });
+}
+
+// SPEC: default behavior preserves external adapters' direct pull without streaming support.
+#[test]
+fn external_adapter_default_pull_keeps_direct_path() {
+    if isolated("external_adapter_default_pull_keeps_direct_path") {
+        return;
+    }
+    run(async {
+        let f = Fixture::new(false);
+        let store = StoreUri::parse(&format!("ssh://{}", f.store.display())).unwrap();
+        snapdir_api::pull(&f.id, &store, &f.dest, &CheckoutOptions::default())
+            .await
+            .unwrap();
+        f.assert_tree(&f.dest);
+    });
+}
+
+// SPEC: unsupported streaming overrides fail explicitly; never silently ignore a requested cache/pool.
+#[test]
+fn external_adapter_overrides_are_rejected_before_transfer() {
+    if isolated("external_adapter_overrides_are_rejected_before_transfer") {
+        return;
+    }
+    run(async {
+        let f = Fixture::new(false);
+        let external = StoreUri::parse(&format!("ssh://{}", f.store.display())).unwrap();
+        let mut pool_opts = options(&f.cache, None);
+        pool_opts.transfer.objects_store = Some(external.clone());
+        for (store, opts) in [
+            (external.clone(), options(&f.cache, None)),
+            (uri(&f.store), pool_opts),
+            (external, options(&f.cache, Some(&f.pool))),
+        ] {
+            let result = snapdir_api::pull(&f.id, &store, &f.dest, &opts).await;
+            assert_eq!(result.unwrap_err().code(), "INVALID_STORE");
+            assert!(!f.dest.exists());
+            assert!(!f.cache.exists());
+        }
+    });
+}
+
+// SPEC: filesystem materialization failure must be returned, not reported as a successful transfer.
+#[test]
+fn destination_io_failure_is_returned_and_existing_bytes_preserved() {
+    if isolated("destination_io_failure_is_returned_and_existing_bytes_preserved") {
+        return;
+    }
+    run(async {
+        let f = Fixture::new(false);
+        std::fs::write(&f.dest, b"preserve file").unwrap();
+        assert!(
+            snapdir_api::pull(&f.id, &uri(&f.store), &f.dest, &options(&f.cache, None))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&f.dest).unwrap(), b"preserve file");
+        assert!(
+            snapdir_api::checkout(&f.id, &f.dest, &options(&f.store, None))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&f.dest).unwrap(), b"preserve file");
     });
 }
