@@ -1349,6 +1349,8 @@ pub fn defaults() -> EffectiveConfig {
 ///
 /// After a successful `fetch`, the snapshot is available for [`checkout`]
 /// (materialise to a directory) without hitting the remote store again.
+/// `cache_dir` selects the local cache and `objects_store` selects a separate
+/// object pool. Fetch requires in-process streaming stores, including for the pool.
 ///
 /// # Errors
 ///
@@ -1358,7 +1360,8 @@ pub async fn fetch(id: &SnapshotId, store: &StoreUri, _options: &TransferOptions
     let hex_id = id.to_hex();
     let store_str = store.raw.clone();
 
-    tokio::task::spawn_blocking(move || fetch_sync(&hex_id, &store_str))
+    let transfer = _options.clone();
+    tokio::task::spawn_blocking(move || fetch_sync(&hex_id, &store_str, &transfer))
         .await
         .map_err(|e| SnapdirError::Io(std::io::Error::other(e.to_string())))?
 }
@@ -1639,31 +1642,8 @@ fn size_sync(store_str: &str, id: Option<&str>) -> Result<SizeStats> {
     Ok(manifests_size(&manifests))
 }
 
-fn fetch_sync(hex_id: &str, store_str: &str) -> Result<()> {
-    use snapdir_stores::file_store::FileStore;
-
-    // Get the manifest from the remote store, then sync everything to cache.
-    let src_fs = open_stream_store(store_str)?;
-    let cache_dir = cache_dir_default();
-    let cache_str = format!("file://{}", cache_dir.display());
-    let cache_fs = FileStore::new(&cache_str);
-
-    snapdir_stores::sync_snapshot(
-        &*src_fs,
-        &cache_fs,
-        hex_id,
-        &snapdir_stores::transfer::TransferConfig::default(),
-        false,
-        None,
-    )
-    .map(|_| ())
-    .map_err(SnapdirError::from)
-}
-
 fn pull_sync(hex_id: &str, store_str: &str, dest: &Path, transfer: &TransferOptions) -> Result<()> {
-    use snapdir_stores::file_store::FileStore;
     use snapdir_stores::router::{resolve_adapter, Adapter};
-    use snapdir_stores::split::SplitStore;
 
     // External adapters have Store but no StreamStore. Preserve their existing direct
     // pull when no cache/pool override is requested; explicit overrides require the
@@ -1680,6 +1660,15 @@ fn pull_sync(hex_id: &str, store_str: &str, dest: &Path, transfer: &TransferOpti
         return restore_permissions(&manifest, dest);
     }
 
+    fetch_sync(hex_id, store_str, transfer)?;
+    let cache_dir = transfer.cache_dir.clone().unwrap_or_else(cache_dir_default);
+    materialize_cache(hex_id, &cache_dir, dest)
+}
+
+fn fetch_sync(hex_id: &str, store_str: &str, transfer: &TransferOptions) -> Result<()> {
+    use snapdir_stores::file_store::FileStore;
+    use snapdir_stores::split::SplitStore;
+
     let manifests = open_stream_store(store_str)?;
     let source = match &transfer.objects_store {
         Some(objects) => Box::new(SplitStore::from_boxed(
@@ -1689,7 +1678,7 @@ fn pull_sync(hex_id: &str, store_str: &str, dest: &Path, transfer: &TransferOpti
         None => manifests,
     };
     // A warm cache must not turn a missing manifest at the requested location into
-    // a successful pull. The location remains authoritative even on repeat pulls.
+    // a successful transfer. The location remains authoritative on repeat fetches.
     source.get_manifest(hex_id).map_err(SnapdirError::from)?;
     let cache_dir = transfer.cache_dir.clone().unwrap_or_else(cache_dir_default);
     let cache = FileStore::from_root(&cache_dir);
@@ -1702,10 +1691,13 @@ fn pull_sync(hex_id: &str, store_str: &str, dest: &Path, transfer: &TransferOpti
         None,
     )
     .map_err(SnapdirError::from)?;
-    materialize_cache(hex_id, &cache_dir, dest)
+    validated_cache_manifest(hex_id, &cache_dir).map(|_| ())
 }
 
-fn materialize_cache(hex_id: &str, cache_dir: &Path, dest: &Path) -> Result<()> {
+fn validated_cache_manifest(
+    hex_id: &str,
+    cache_dir: &Path,
+) -> Result<snapdir_core::manifest::Manifest> {
     use snapdir_core::merkle::Blake3Hasher;
     use snapdir_core::store::Store;
     use snapdir_core::{check_manifest_integrity, CacheError};
@@ -1722,7 +1714,15 @@ fn materialize_cache(hex_id: &str, cache_dir: &Path, dest: &Path) -> Result<()> 
         CacheError::Io(io) => SnapdirError::Io(io),
         other => SnapdirError::Io(std::io::Error::other(other)),
     })?;
-    cache
+    Ok(manifest)
+}
+
+fn materialize_cache(hex_id: &str, cache_dir: &Path, dest: &Path) -> Result<()> {
+    use snapdir_core::store::Store;
+    use snapdir_stores::file_store::FileStore;
+
+    let manifest = validated_cache_manifest(hex_id, cache_dir)?;
+    FileStore::from_root(cache_dir)
         .fetch_files(&manifest, dest)
         .map_err(SnapdirError::from)?;
     restore_permissions(&manifest, dest)
