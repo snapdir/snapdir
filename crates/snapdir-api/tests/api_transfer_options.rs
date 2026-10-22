@@ -169,9 +169,10 @@ impl Fixture {
             std::fs::read(dest.join("duplicate.bin")).unwrap(),
             b"transfer-contract\0\xff\x01"
         );
-        assert!(std::fs::read(dest.join("nested space/日本語/empty"))
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            std::fs::read(dest.join("nested space/日本語/empty")).unwrap(),
+            [] as [u8; 0]
+        );
         assert_eq!(
             std::fs::read(dest.join("nested space/日本語/one")).unwrap(),
             b"x"
