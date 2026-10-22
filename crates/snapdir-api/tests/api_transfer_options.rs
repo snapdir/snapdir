@@ -595,3 +595,149 @@ fn destination_io_failure_is_returned_and_existing_bytes_preserved() {
         assert_eq!(std::fs::read(&f.dest).unwrap(), b"preserve file");
     });
 }
+
+// SPEC: fetch honors both split object stores and explicit cache, then checkout works offline.
+#[test]
+fn fetch_split_pool_populates_only_explicit_cache_for_offline_checkout() {
+    if isolated("fetch_split_pool_populates_only_explicit_cache_for_offline_checkout") {
+        return;
+    }
+    run(async {
+        let f = Fixture::new(true);
+        let opts = options(&f.cache, Some(&f.pool));
+        snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+            .await
+            .unwrap();
+        assert!(shard(&f.cache, ".manifests", &f.id.to_hex()).is_file());
+        assert_eq!(
+            std::fs::read(shard(&f.cache, ".objects", &f.object_hex)).unwrap(),
+            b"transfer-contract\0\xff\x01"
+        );
+        assert!(!f.dest.exists(), "fetch must not materialize a destination");
+        std::fs::remove_dir_all(&f.store).unwrap();
+        std::fs::remove_dir_all(&f.pool).unwrap();
+        snapdir_api::checkout(&f.id, &f.dest, &opts).await.unwrap();
+        f.assert_tree(&f.dest);
+        let other_dest = f.dest.with_file_name("default must not borrow");
+        assert!(
+            snapdir_api::checkout(&f.id, &other_dest, &CheckoutOptions::default())
+                .await
+                .is_err()
+        );
+        assert!(!other_dest.exists());
+    });
+}
+
+// SPEC: even a warm fetch must validate the requested source manifest location.
+#[test]
+fn fetch_warm_cache_refuses_missing_or_corrupt_source_manifest() {
+    if isolated("fetch_warm_cache_refuses_missing_or_corrupt_source_manifest") {
+        return;
+    }
+    run(async {
+        for corrupt in [false, true] {
+            let f = Fixture::new(true);
+            let opts = options(&f.cache, Some(&f.pool));
+            snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+                .await
+                .unwrap();
+            let manifest = shard(&f.store, ".manifests", &f.id.to_hex());
+            if corrupt {
+                std::fs::write(manifest, b"corrupt manifest\n").unwrap();
+            } else {
+                std::fs::remove_file(manifest).unwrap();
+            }
+            assert!(snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+                .await
+                .is_err());
+            // The failure must not remove the previously valid offline snapshot.
+            snapdir_api::checkout(&f.id, &f.dest, &opts).await.unwrap();
+            f.assert_tree(&f.dest);
+        }
+    });
+}
+
+// SPEC: successful fetch guarantees a usable cache; cached manifest alone cannot certify corrupt bytes.
+#[test]
+fn fetch_warm_cache_refuses_corrupt_or_missing_cached_object() {
+    if isolated("fetch_warm_cache_refuses_corrupt_or_missing_cached_object") {
+        return;
+    }
+    run(async {
+        for corrupt in [false, true] {
+            let f = Fixture::new(true);
+            let opts = options(&f.cache, Some(&f.pool));
+            snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+                .await
+                .unwrap();
+            let object = shard(&f.cache, ".objects", &f.object_hex);
+            if corrupt {
+                std::fs::write(object, b"corrupt").unwrap();
+            } else {
+                std::fs::remove_file(object).unwrap();
+            }
+            assert!(snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer).await.is_err(),
+                "fetch must refuse a corrupt or incomplete selected cache rather than report success");
+            assert!(!f.dest.exists());
+        }
+    });
+}
+
+// SPEC: verified warm cache objects may be reused while the source manifest remains authoritative.
+#[test]
+fn fetch_reuses_verified_warm_cache_when_pool_objects_are_offline() {
+    if isolated("fetch_reuses_verified_warm_cache_when_pool_objects_are_offline") {
+        return;
+    }
+    run(async {
+        let f = Fixture::new(true);
+        let opts = options(&f.cache, Some(&f.pool));
+        snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(f.pool.join(".objects")).unwrap();
+        snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+            .await
+            .unwrap();
+        snapdir_api::checkout(&f.id, &f.dest, &opts).await.unwrap();
+        f.assert_tree(&f.dest);
+    });
+}
+
+// SPEC: cold fetch cannot substitute colocated objects for a missing or corrupt explicit pool.
+#[test]
+fn fetch_refuses_missing_or_corrupt_explicit_pool_objects() {
+    if isolated("fetch_refuses_missing_or_corrupt_explicit_pool_objects") {
+        return;
+    }
+    run(async {
+        for corrupt in [false, true] {
+            let f = Fixture::new(true);
+            snapdir_api::stage(
+                &f.source,
+                &StageOptions {
+                    cache_dir: Some(f.store.clone()),
+                    keep: true,
+                },
+            )
+            .unwrap();
+            let object = shard(&f.pool, ".objects", &f.object_hex);
+            if corrupt {
+                std::fs::write(object, b"corrupt").unwrap();
+            } else {
+                std::fs::remove_file(object).unwrap();
+            }
+            assert!(snapdir_api::fetch(
+                &f.id,
+                &uri(&f.store),
+                &options(&f.cache, Some(&f.pool)).transfer
+            )
+            .await
+            .is_err());
+            assert!(
+                !shard(&f.cache, ".manifests", &f.id.to_hex()).exists(),
+                "failed fetch must not publish a cache manifest for an incomplete snapshot"
+            );
+        }
+    });
+}
