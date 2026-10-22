@@ -5,12 +5,12 @@
 //!
 //! # u64 / size
 //!
-//! PyO3 0.23 maps Rust `u64` → Python `int` (arbitrary precision). The
+//! `PyO3` 0.23 maps Rust `u64` → Python `int` (arbitrary precision). The
 //! `ManifestEntry.size` field uses `u64` directly — never cast to `f64`.
 //!
 //! # Exception hierarchy
 //!
-//! With `abi3` enabled, PyO3 cannot subclass native Python types via
+//! With `abi3` enabled, `PyO3` cannot subclass native Python types via
 //! `#[pyclass(extends=PyException)]`. Instead we use `create_exception!` to
 //! define the hierarchy in Python-space, and attach `.code` to each raised
 //! instance via `setattr` at raise time.
@@ -55,6 +55,8 @@ pyo3::create_exception!(snapdir, CatalogError, SnapdirError);
 
 /// Raises the correct Python exception subtype for a `snapdir_api::SnapdirError`,
 /// attaching `.code` to the instance.
+// The error mapper consumes Result errors without changing its call signature.
+#[allow(clippy::needless_pass_by_value)]
 fn raise_snapdir_err(py: Python<'_>, e: snapdir_api::SnapdirError) -> PyErr {
     let code = e.code().to_owned();
     let msg = e.to_string();
@@ -374,7 +376,7 @@ fn path_arg(obj: &Bound<'_, PyAny>) -> PyResult<std::path::PathBuf> {
 // `future_into_py` closures (where the lifetime is 'static).
 // ---------------------------------------------------------------------------
 
-/// Convert a PyO3 `Bound<'py, T>` to a `PyObject` (= `Py<PyAny>`).
+/// Convert a `PyO3` `Bound<'py, T>` to a `PyObject` (= `Py<PyAny>`).
 fn into_py_obj<T: pyo3::PyClass>(bound: Bound<'_, T>) -> PyObject {
     bound.into_any().unbind()
 }
@@ -398,6 +400,8 @@ fn version() -> String {
 /// SYNC — pure compute, no I/O, callable without an event loop.
 /// Returns a 64-lowercase-hex `str`.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn id_from_manifest(m: PyRef<'_, Manifest>) -> String {
     let api_manifest = snapdir_api::Manifest {
         raw: m.raw.clone(),
@@ -410,6 +414,8 @@ fn id_from_manifest(m: PyRef<'_, Manifest>) -> String {
 // build_manifest_options() — shared helper for manifest/id keyword options
 // ---------------------------------------------------------------------------
 
+// The external options type is non_exhaustive, so struct initialization is unavailable.
+#[allow(clippy::field_reassign_with_default)]
 fn build_manifest_options(
     no_follow: bool,
     absolute: bool,
@@ -529,6 +535,8 @@ fn stage<'py>(py: Python<'py>, path: &Bound<'_, PyAny>) -> PyResult<Bound<'py, P
 /// ASYNC — network / I/O-bound.
 /// `store` is a `StoreUri` instance. Returns a 64-lowercase-hex `str`.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn push<'py>(
     py: Python<'py>,
     path: &Bound<'_, PyAny>,
@@ -561,6 +569,8 @@ fn push<'py>(
 /// ASYNC — network / I/O-bound.
 /// `snapshot_id` is a `SnapshotId`; `store` is a `StoreUri`.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn fetch<'py>(
     py: Python<'py>,
     snapshot_id: PyRef<'_, SnapshotId>,
@@ -590,6 +600,8 @@ fn fetch<'py>(
 ///
 /// ASYNC — network / I/O-bound.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn pull<'py>(
     py: Python<'py>,
     snapshot_id: PyRef<'_, SnapshotId>,
@@ -626,6 +638,8 @@ fn pull<'py>(
 ///
 /// ASYNC — I/O-bound.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn checkout<'py>(
     py: Python<'py>,
     snapshot_id: PyRef<'_, SnapshotId>,
@@ -653,6 +667,8 @@ fn checkout<'py>(
 ///
 /// ASYNC — network / I/O-bound.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn sync<'py>(
     py: Python<'py>,
     snapshot_id: PyRef<'_, SnapshotId>,
@@ -686,6 +702,8 @@ fn sync<'py>(
 ///
 /// ASYNC — I/O-bound. Accepts a `DiffOptions` instance.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn diff<'py>(py: Python<'py>, opts: PyRef<'_, DiffOptions>) -> PyResult<Bound<'py, PyAny>> {
     let from_uris = opts.from_uris.clone();
     let to_uris = opts.to_uris.clone();
@@ -739,6 +757,8 @@ fn diff<'py>(py: Python<'py>, opts: PyRef<'_, DiffOptions>) -> PyResult<Bound<'p
 /// `snapshot_id` accepts a 64-hex `str` directly (for convenience) or a
 /// `SnapshotId` instance. `store` is a `StoreUri` instance.
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn verify<'py>(
     py: Python<'py>,
     snapshot_id: &Bound<'_, PyAny>,
@@ -769,7 +789,7 @@ fn verify<'py>(
 // SizeStats + size() + manifest_size()
 // ---------------------------------------------------------------------------
 
-/// Byte-size accounting for a snapshot or store (BigQuery nomenclature).
+/// Byte-size accounting for a snapshot or store (`BigQuery` nomenclature).
 ///
 /// All fields are arbitrary-precision Python `int` (mapped from Rust `u64`).
 /// Objects are stored uncompressed, so `physical_bytes` equals the on-disk
@@ -815,6 +835,8 @@ impl From<snapdir_api::SizeStats> for SizeStats {
 /// with no manifests resolves to zeros.
 #[pyfunction]
 #[pyo3(signature = (store, id=None))]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn size<'py>(
     py: Python<'py>,
     store: PyRef<'_, StoreUri>,
@@ -844,6 +866,8 @@ fn size<'py>(
 /// = sum of size over unique content checksums. Mirrors
 /// `snapdir_api::manifest_size` (dedup-by-checksum over File entries).
 #[pyfunction]
+// PyO3 extracts an owned PyRef guard at this frozen Python boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn manifest_size(m: PyRef<'_, Manifest>) -> SizeStats {
     let mut logical: u64 = 0;
     let mut files: u64 = 0;
@@ -868,7 +892,7 @@ fn manifest_size(m: PyRef<'_, Manifest>) -> SizeStats {
 // Module entry point
 // ---------------------------------------------------------------------------
 
-/// PyO3 extension module: `import snapdir`.
+/// `PyO3` extension module: `import snapdir`.
 #[pymodule]
 fn snapdir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Exception hierarchy
