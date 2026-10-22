@@ -664,6 +664,7 @@ fn fetch_warm_cache_refuses_corrupt_or_missing_cached_object() {
         return;
     }
     run(async {
+        let mut refused = Vec::new();
         for corrupt in [false, true] {
             let f = Fixture::new(true);
             let opts = options(&f.cache, Some(&f.pool));
@@ -676,10 +677,15 @@ fn fetch_warm_cache_refuses_corrupt_or_missing_cached_object() {
             } else {
                 std::fs::remove_file(object).unwrap();
             }
-            assert!(snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer).await.is_err(),
-                "fetch must refuse a corrupt or incomplete selected cache rather than report success");
+            refused.push(
+                snapdir_api::fetch(&f.id, &uri(&f.store), &opts.transfer)
+                    .await
+                    .is_err(),
+            );
             assert!(!f.dest.exists());
         }
+        assert_eq!(refused, vec![true, true],
+            "fetch must refuse both missing and corrupt selected-cache objects rather than report success");
     });
 }
 
