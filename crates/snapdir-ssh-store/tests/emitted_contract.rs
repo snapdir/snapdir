@@ -337,7 +337,7 @@ fn config_defaults() {
     assert_eq!(cfg.control_persist, 60);
     assert_eq!(cfg.umask, DEFAULT_UMASK);
     assert_eq!(cfg.umask, "077");
-    assert!(cfg.extra_opts.is_empty());
+    assert_eq!(cfg.extra_opts, [] as [String; 0]);
 }
 
 #[test]
@@ -795,7 +795,7 @@ fn run_version_prints_engine_binary_name_and_crate_version() {
         out,
         format!("snapdir-ssh-store {}\n", env!("CARGO_PKG_VERSION"))
     );
-    assert!(err.is_empty());
+    assert_eq!(err, "");
 
     let (code, out, _) = run_capture(Engine::Sftp, &["snapdir-sftp-store", "-v"]);
     assert_eq!(code, 0);

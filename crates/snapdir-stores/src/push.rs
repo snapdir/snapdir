@@ -424,7 +424,8 @@ mod tests {
 
         // `async` (despite no await) to model the real backends' async
         // existence check the orchestrator awaits.
-        #[allow(clippy::unused_async)]
+        #[allow(unknown_lints)] // Compatibility with pre-1.99 Clippy lint names.
+        #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
         async fn key_exists(&self, key: String) -> Result<bool, StoreError> {
             Ok(self.present.contains(&key))
         }
@@ -446,7 +447,8 @@ mod tests {
             Ok(())
         }
 
-        #[allow(clippy::unused_async)]
+        #[allow(unknown_lints)] // Compatibility with pre-1.99 Clippy lint names.
+        #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
         async fn write_manifest(&self) -> Result<(), StoreError> {
             self.uploads_done_at_manifest
                 .store(self.uploaded.lock().unwrap().len(), Ordering::SeqCst);

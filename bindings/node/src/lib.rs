@@ -3,13 +3,13 @@
 //! Wraps the frozen `snapdir-api` §6 surface. Every exported symbol maps
 //! 1:1 to a `snapdir_api` function or type — no reimplementation of logic.
 //!
-//! # BigInt / u64
+//! # `BigInt` / u64
 //!
 //! napi-rs maps Rust `u64` → JS `BigInt`. `ManifestEntry.size` is `u64` in
 //! `snapdir-api` and therefore surfaces as `bigint` in JS — the headline
 //! Node idiom requirement.
 //!
-//! # SnapdirError
+//! # `SnapdirError`
 //!
 //! napi-rs errors are `instanceof Error`. We embed the error code in the
 //! napi Error message as `[CODE] message` so the JS wrapper (`index.js`)
@@ -18,7 +18,7 @@
 //! # Async / Sync split
 //!
 //! - `manifest`, `id`, `stage`: ASYNC in the Node binding. They use the
-//!   `Task` pattern (napi_queue_async_work → libuv thread pool) so that
+//!   `Task` pattern (`napi_queue_async_work` → libuv thread pool) so that
 //!   the completion fires via the libuv event loop (check phase), which
 //!   guarantees that setTimeout(0) timers fire while the work is in flight.
 //! - `idFromManifest`, `version`: SYNC (pure compute / infallible).
@@ -34,9 +34,11 @@ use napi_derive::napi;
 // Helpers: encode SnapdirError into a napi Error with "[CODE] message" prefix
 // ---------------------------------------------------------------------------
 
+// Result::map_err consumes its error; keep this mapper directly usable there.
+#[allow(clippy::needless_pass_by_value)]
 fn snapdir_err_to_napi(e: snapdir_api::SnapdirError) -> napi::Error {
     let code = e.code().to_owned();
-    let message = format!("[{}] {}", code, e);
+    let message = format!("[{code}] {e}");
     napi::Error::new(napi::Status::GenericFailure, message)
 }
 
@@ -140,6 +142,8 @@ fn api_manifest_to_napi(m: snapdir_api::Manifest) -> Manifest {
 /// All fields are `bigint` (`u64`) — a store can exceed
 /// `Number.MAX_SAFE_INTEGER`. Objects are stored uncompressed, so
 /// `physicalBytes` equals the on-disk `.objects/` byte total.
+// Preserve the frozen generated TypeScript documentation bytes.
+#[allow(clippy::doc_markdown)]
 #[napi(object)]
 pub struct SizeStats {
     /// Apparent content size — Σ of every file's size (duplicates counted).
@@ -184,6 +188,8 @@ pub async fn size(store_uri: String, id: Option<String>) -> napi::Result<SizeSta
 /// `logicalBytes` = Σ file sizes (duplicates counted); `physicalBytes` = Σ
 /// size over unique content checksums (the deduplicated footprint). Mirrors
 /// `snapdir_api::manifest_size` (dedup-by-checksum over File entries).
+// napi-rs converts the JS object into an owned Manifest at this boundary.
+#[allow(clippy::needless_pass_by_value)]
 #[napi(js_name = "manifestSize")]
 pub fn manifest_size(m: Manifest) -> SizeStats {
     let mut logical: u64 = 0;
@@ -263,6 +269,7 @@ pub struct DiffParams {
 
 /// Returns the `snapdir-api` crate version string (e.g. `"1.10.0"`).
 #[napi]
+#[must_use]
 pub fn version() -> String {
     snapdir_api::version().to_owned()
 }
@@ -276,6 +283,7 @@ pub fn version() -> String {
 /// SYNC — pure, no I/O, infallible. Result is identical to `id(path)`.
 /// Returns a 64-lowercase-hex `SnapshotId` string.
 #[napi(js_name = "idFromManifest")]
+#[must_use]
 pub fn id_from_manifest(m: Manifest) -> String {
     // Reconstruct a snapdir_api::Manifest from the raw text.
     // The raw text is the authoritative format; re-parsing it is the same
@@ -298,6 +306,8 @@ pub fn id_from_manifest(m: Manifest) -> String {
 ///
 /// napi-rs camelCases snake_case field names automatically, so the JS/TS
 /// surface is `noFollow`, `absolute`, `exclude`.
+// Preserve the frozen generated TypeScript documentation bytes.
+#[allow(clippy::doc_markdown)]
 #[napi(object)]
 pub struct ManifestOptions {
     /// When `true`, symbolic links are recorded as links rather than being
@@ -369,6 +379,7 @@ impl Task for ManifestTask {
 /// path rendering (`absolute`), and entry filtering (`exclude`). Omitting
 /// it (or passing `{}`) reproduces the current default behavior.
 #[napi]
+#[must_use]
 pub fn manifest(path: String, options: Option<ManifestOptions>) -> AsyncTask<ManifestTask> {
     AsyncTask::new(ManifestTask {
         path,
@@ -409,6 +420,7 @@ impl Task for IdTask {
 /// path rendering (`absolute`), and entry filtering (`exclude`). Omitting
 /// it (or passing `{}`) reproduces the current default behavior.
 #[napi]
+#[must_use]
 pub fn id(path: String, options: Option<ManifestOptions>) -> AsyncTask<IdTask> {
     AsyncTask::new(IdTask {
         path,
@@ -444,6 +456,7 @@ impl Task for StageTask {
 /// ASYNC — walk + cache write run on the libuv thread pool.
 /// Returns a 64-lowercase-hex `SnapshotId` string.
 #[napi]
+#[must_use]
 pub fn stage(path: String) -> AsyncTask<StageTask> {
     AsyncTask::new(StageTask { path })
 }

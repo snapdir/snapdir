@@ -1767,7 +1767,7 @@ mod tests {
             err.to_string().contains("invalid manifest id"),
             "got: {err}"
         );
-        assert!(pack.is_empty());
+        assert_eq!(pack, [] as [u8; 0]);
     }
 
     #[test]

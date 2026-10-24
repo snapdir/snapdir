@@ -688,9 +688,9 @@ mod tests {
     fn empty_catalog_returns_empty() {
         let dir = TempDir::new();
         let cat = Catalog::open(dir.db_path()).unwrap();
-        assert!(cat.locations().unwrap().is_empty());
-        assert!(cat.ancestors(A, None).unwrap().is_empty());
-        assert!(cat.revisions("/local/foo").unwrap().is_empty());
+        assert_eq!(cat.locations().unwrap(), [] as [Record; 0]);
+        assert_eq!(cat.ancestors(A, None).unwrap(), [] as [Record; 0]);
+        assert_eq!(cat.revisions("/local/foo").unwrap(), [] as [Record; 0]);
     }
 
     #[test]
@@ -793,7 +793,7 @@ mod tests {
         cat.save("s3://bar", C, &clock).unwrap();
 
         // ancestors of a root id -> empty (no row has id=A with non-null prev).
-        assert!(cat.ancestors(A, None).unwrap().is_empty());
+        assert_eq!(cat.ancestors(A, None).unwrap(), [] as [Record; 0]);
 
         // ancestors of C: rows where id=C and previous_id non-null:
         //   s3://bar   C (prev A) @ .005
@@ -833,7 +833,7 @@ mod tests {
         assert_eq!(revs[1].previous_id, None);
 
         // An untracked location yields nothing.
-        assert!(cat.revisions("/not/avail").unwrap().is_empty());
+        assert_eq!(cat.revisions("/not/avail").unwrap(), [] as [Record; 0]);
     }
 
     #[test]
@@ -1252,7 +1252,7 @@ mod tests {
         // The stale id B is gone everywhere: it no longer appears as an id in
         // revisions, and ancestors keyed on B is empty.
         assert!(revs.iter().all(|r| r.id != B));
-        assert!(cat.ancestors(B, None).unwrap().is_empty());
+        assert_eq!(cat.ancestors(B, None).unwrap(), [] as [Record; 0]);
         // loc_head now points at C.
         let loc = cat
             .locations()
@@ -1318,7 +1318,7 @@ mod tests {
         assert_eq!(cat.revisions(location).unwrap().len(), 1);
         // An empty store view (no manifests) clears the location entirely.
         cat.rebuild(location, Vec::<RebuildEntry>::new()).unwrap();
-        assert!(cat.revisions(location).unwrap().is_empty());
+        assert_eq!(cat.revisions(location).unwrap(), [] as [Record; 0]);
         assert!(cat
             .locations()
             .unwrap()
