@@ -50,7 +50,7 @@ blake3 = "1.8.5"
 # bundles libzstd via `zstd-sys` (cc/build.rs) — the SAME C-build pattern already
 # exercised by `blake3`, with no system zstd required — and is MIT/BSD-3 (license
 # clean for deny.toml). `ruzstd` is decode-only and is NOT used as the encoder.
-zstd = "0.13"
+zstd = "0.14"
 
 # --- S3 store (s3:// + S3-compatible) ---------------------------------------
 # CRITICAL TLS constraint: the shipped binary statically links on musl, so the
@@ -76,7 +76,6 @@ aws-config = { version = "1", default-features = false, features = [
 ] }
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "rt-tokio",
-    "sigv4a",
 ] }
 aws-smithy-runtime-api = { version = "1", features = ["client", "http-1x"] }
 # The SDK's hyper-1.x HTTP client + rustls(ring) TLS connector. `rustls-ring`

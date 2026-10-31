@@ -2089,7 +2089,7 @@ mod tests {
         let code = unsafe { CStr::from_ptr(code_ptr) }.to_str().unwrap();
         assert_eq!(code, "INVALID_ID");
         let msg = unsafe { CStr::from_ptr(msg_ptr) }.to_str().unwrap();
-        assert!(!msg.is_empty());
+        assert_ne!(msg, "");
 
         // Free — the inspect pointers must not be used afterwards.
         unsafe { snapdir_error_free(raw) };
