@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-10-31
+
+### Fixed
+
+- **API `pull`, `checkout` and `fetch` honor `CheckoutOptions.transfer`.** An
+  explicit cache or a separate manifest/object store is no longer silently
+  replaced by the defaults. Pull and fetch require the requested source
+  manifest even with a warm cache; checkout reads only its selected local cache
+  and works offline; materialization verifies cached content before writing.
+  External adapters reject explicit cache/pool overrides with `INVALID_STORE`.
+
+### Security
+
+- Dependency refresh for RUSTSEC-2026-0258, -0285, -0346, -0348, -0349, -0382,
+  -0383, -0385, -0386, -0387, -0391, -0398, -0403 and -0410 (h2, rustls,
+  rustls-webpki, webpki-root-certs, tokio, ctutils, zstd 0.14, zstd-safe,
+  zstd-sys).
+- The S3 store no longer enables AWS SigV4a (multi-region access points); it
+  was unused and was the only path to a vulnerable `crypto-bigint`.
+
 ## [1.10.0] - 2026-06-21
 
 ### Added
